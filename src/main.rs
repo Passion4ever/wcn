@@ -80,15 +80,9 @@ fn main() -> io::Result<()> {
     let mut mode = Mode::Full;
     let mut rev = false;
     let mut last: Option<(u64, u16, u16, bool, bool)> = None;
-    let mut last_heal = std::time::Instant::now();
 
     loop {
-        // 定期强制全屏重绘:治外部干扰/字体变化造成的花屏(ratatui 默认只画差异,不会自愈)
-        if last_heal.elapsed() >= Duration::from_secs(2) {
-            terminal.clear()?;
-            last = None;
-            last_heal = std::time::Instant::now();
-        }
+        // 正常只画差异(不清屏,故不闪);花屏的根源是尺寸变化,由下方 Resize 清屏处理。
         let (snap_opt, ver) = {
             let g = shared.lock().unwrap();
             (g.0.clone(), g.1)
