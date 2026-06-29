@@ -2,6 +2,7 @@
 
 mod collect;
 mod parse;
+mod render;
 
 fn main() {
     // 临时冒烟:采两次(隔 1s)打印 Snapshot 概要,验证采集正确。
