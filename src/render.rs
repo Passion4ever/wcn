@@ -2,10 +2,10 @@
 // 说明:ratatui 表格需显式列宽、无内置网格线;GPU 进程表的卡间分隔用分隔行实现,
 // 系统面板的填充条用 LineGauge。配色全部相对主题(不设 fg 即用终端默认;dim/reversed/语义色)。
 use crate::collect::{CpuProc, Snapshot};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, LineGauge, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
 use ratatui::Frame;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -61,6 +61,47 @@ fn cell_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
         Span::styled("█".repeat(fill), pct_style(pct)),
         Span::styled("░".repeat(width - fill), dim()),
     ]
+}
+
+/// 字符显示宽度(粗略东亚宽字符=2),给命令按显示宽截断用。
+fn disp_w(c: char) -> usize {
+    let u = c as u32;
+    if (0x1100..=0x115F).contains(&u)
+        || (0x2E80..=0xA4CF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE30..=0xFE4F).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u)
+        || (0x20000..=0x3FFFD).contains(&u)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+/// 按显示宽截断,超长结尾加 …(留 1 列给省略号)。
+fn truncate_w(s: &str, max: usize) -> String {
+    let total: usize = s.chars().map(disp_w).sum();
+    if total <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = disp_w(ch);
+        if w + cw > max - 1 {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
 }
 
 fn r_cell(s: String, style: Style) -> Cell<'static> {
@@ -119,7 +160,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         let order = if rev { "升序" } else { "降序" };
         let shown = procs.len().min(n);
         let title = format!("CPU 进程 · 共 {},显示 {}({})", snap.cpu_procs.len(), shown, order);
-        let table = cpu_table(&procs[..shown], me, true).block(panel(&title, Color::Blue));
+        let table = cpu_table(&procs[..shown], me, true, w.saturating_sub(2)).block(panel(&title, Color::Blue));
         f.render_widget(table, chunks[1]);
         f.render_widget(
             Paragraph::new(Line::from(Span::styled("  [c] 返回   [r] 反序   [q] 退出", dim()))),
@@ -180,7 +221,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     let mut idx = 3;
     if cpu_panel_h > 0 {
         let procs: Vec<&CpuProc> = snap.cpu_procs.iter().take(cpu_rows).collect();
-        let table = cpu_table(&procs, me, false).block(panel("CPU 进程 Top 10", Color::Blue));
+        let table = cpu_table(&procs, me, false, w.saturating_sub(2)).block(panel("CPU 进程 Top 10", Color::Blue));
         f.render_widget(table, chunks[idx]);
         idx += 1;
     }
@@ -281,6 +322,7 @@ fn render_sys(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let row_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(vec![Constraint::Length(1); rows.len()])
+        .flex(Flex::Center) // 并排时与 GPU 表等高:行组垂直居中
         .split(inner);
     for (i, (label, ratio, value)) in rows.into_iter().enumerate() {
         let cols = Layout::default()
@@ -289,12 +331,9 @@ fn render_sys(f: &mut Frame, area: Rect, snap: &Snapshot) {
             .split(row_areas[i]);
         f.render_widget(Paragraph::new(label), cols[0]);
         if let Some(r) = ratio {
-            let g = LineGauge::default()
-                .filled_style(pct_style(r))
-                .unfilled_style(dim())
-                .ratio((r / 100.0).clamp(0.0, 1.0))
-                .label("");
-            f.render_widget(g, cols[1]);
+            // 粗块条(█/░)填满中列,与 Python 一致
+            let bar = cell_bar(r, cols[1].width as usize);
+            f.render_widget(Paragraph::new(Line::from(bar)), cols[1]);
         }
         f.render_widget(Paragraph::new(value), cols[2]);
     }
@@ -450,7 +489,9 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
         } else {
             format!("{}%", p.sm)
         };
-        let cmd = crate::parse::shorten_cmd(&p.cmd, home());
+        // COMMAND 可用宽 = inner - 前导1 - 各固定列 - 各 " │ "(7×3)
+        let cmd_avail = iw.saturating_sub(1 + GP_W.iter().sum::<usize>() + GP_W.len() * 3);
+        let cmd = truncate_w(&crate::parse::shorten_cmd(&p.cmd, home()), cmd_avail);
         let cells: [(String, Style); 7] = [
             (pad(&show_g, GP_W[0], Alignment::Center), Style::default().add_modifier(Modifier::BOLD)),
             (pad(&p.pid, GP_W[1], Alignment::Right), base),
@@ -471,7 +512,11 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn cpu_table<'a>(procs: &[&CpuProc], me: &str, with_swap: bool) -> Table<'a> {
+fn cpu_table<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) -> Table<'a> {
+    // COMMAND 可用宽 = 面板内宽 - 各固定列 - 列间距
+    let fixed = 8 + 10 + 6 + 6 + 7 + 7 + if with_swap { 8 } else { 0 };
+    let ncols = if with_swap { 8 } else { 7 };
+    let cmd_w = inner_w.saturating_sub(fixed + (ncols - 1));
     let mut rows: Vec<Row> = Vec::new();
     for p in procs {
         let me_style = if p.user == me {
@@ -494,7 +539,7 @@ fn cpu_table<'a>(procs: &[&CpuProc], me: &str, with_swap: bool) -> Table<'a> {
             }
         }
         cells.push(r_cell(p.etime.clone(), dim()));
-        cells.push(l_cell(crate::parse::shorten_cmd(&p.cmd, home()), Style::default()));
+        cells.push(l_cell(truncate_w(&crate::parse::shorten_cmd(&p.cmd, home()), cmd_w), Style::default()));
         rows.push(Row::new(cells).style(me_style));
     }
     let mut header = vec!["PID", "USER", "CPU%", "MEM%", "RES"];
