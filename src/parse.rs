@@ -134,6 +134,16 @@ pub fn parse_net_dev(text: &str) -> (i64, i64) {
     (rx, tx)
 }
 
+/// 网速 (下行MB/s, 上行MB/s),两次字节计数差 / dt。
+pub fn net_speed(prev: (i64, i64), cur: (i64, i64), dt: f64) -> (f64, f64) {
+    if dt <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let down = ((cur.0 - prev.0) as f64 / dt / 1e6).max(0.0);
+    let up = ((cur.1 - prev.1) as f64 / dt / 1e6).max(0.0);
+    (down, up)
+}
+
 /// (pswpin, pswpout) 累计页计数。
 pub fn parse_vmstat(text: &str) -> (i64, i64) {
     let (mut si, mut so) = (0i64, 0i64);
@@ -266,6 +276,13 @@ mod tests {
                    eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n\
                    ib0: 300 0 0 0 0 0 0 0 400 0 0 0 0 0 0 0\n";
         assert_eq!(parse_net_dev(txt), (1300, 2400));
+    }
+
+    #[test]
+    fn t_net_speed() {
+        let (d, u) = net_speed((0, 0), (2_000_000, 1_000_000), 2.0);
+        assert!((d - 1.0).abs() < 1e-6 && (u - 0.5).abs() < 1e-6);
+        assert_eq!(net_speed((0, 0), (100, 100), 0.0), (0.0, 0.0));
     }
 
     #[test]
