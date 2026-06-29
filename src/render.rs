@@ -530,62 +530,54 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-// GPU 进程表固定列宽
-const GP_W: [usize; 7] = [3, 7, 9, 5, 7, 5, 7];
-
-fn grid_rule(inner: usize) -> Line<'static> {
-    let mut s = String::new();
-    s.push_str(&"─".repeat(1 + GP_W[0] + 1));
-    for w in &GP_W[1..] {
-        s.push('┼');
-        s.push_str(&"─".repeat(1 + w + 1));
-    }
-    s.push('┼');
-    let used = s.chars().count();
-    if inner > used {
-        s.push_str(&"─".repeat(inner - used));
-    }
-    Line::from(Span::styled(s.chars().take(inner).collect::<String>(), dim()))
-}
-
 fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
+    // 无竖线(SIMPLE_HEAVY 风格);第一列=序号(无列名,1 字宽的左 gutter);
+    // 表头下粗 ━ 横线;卡间用细 ─ 分隔;COMMAND 末列按宽省略。
     let block = panel("GPU 进程", Color::Yellow);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let iw = inner.width as usize;
-    let sep = || Span::styled(" │ ", dim());
+
+    // 列:idx(gutter) PID USER GPU% VRAM CPU% TIME COMMAND
+    let (w_pid, w_user, w_gpu, w_vram, w_cpu, w_time) = (7, 9, 5, 7, 5, 7);
+    // 行布局:1空 + idx(1) + 2空(gutter) + 各列(列间 1 空) + COMMAND
+    // 表头/行的固定前缀宽度(到 COMMAND 前)
+    let fixed = 1 + 1 + 2 + w_pid + 1 + w_user + 1 + w_gpu + 1 + w_vram + 1 + w_cpu + 1 + w_time + 1;
+    let cmd_avail = iw.saturating_sub(fixed);
 
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for p in &snap.gpu_procs {
         *counts.entry(p.gpu.clone()).or_insert(0) += 1;
     }
-    let headers = ["GPU", "PID", "USER", "GPU%", "VRAM", "CPU%", "TIME"];
-    let aligns = [
-        Alignment::Center,
-        Alignment::Right,
-        Alignment::Left,
-        Alignment::Right,
-        Alignment::Right,
-        Alignment::Right,
-        Alignment::Right,
-    ];
-    let mut lines: Vec<Line> = Vec::new();
-    let mut hs: Vec<Span> = vec![Span::raw(" ")];
-    for i in 0..7 {
-        hs.push(Span::styled(pad(headers[i], GP_W[i], aligns[i]), hdr_style()));
-        hs.push(sep());
-    }
-    hs.push(Span::styled("COMMAND", hdr_style()));
-    lines.push(Line::from(hs));
-    lines.push(grid_rule(iw));
 
-    let cmd_avail = iw.saturating_sub(1 + GP_W.iter().sum::<usize>() + GP_W.len() * 3);
+    let mut lines: Vec<Line> = Vec::new();
+    // 表头(序号列空白)
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::raw(" "),      // idx 占位(无列名)
+        Span::raw("  "),     // gutter
+        Span::styled(pad("PID", w_pid, Alignment::Right), hdr_style()),
+        Span::raw(" "),
+        Span::styled(pad("USER", w_user, Alignment::Left), hdr_style()),
+        Span::raw(" "),
+        Span::styled(pad("GPU%", w_gpu, Alignment::Right), hdr_style()),
+        Span::raw(" "),
+        Span::styled(pad("VRAM", w_vram, Alignment::Right), hdr_style()),
+        Span::raw(" "),
+        Span::styled(pad("CPU%", w_cpu, Alignment::Right), hdr_style()),
+        Span::raw(" "),
+        Span::styled(pad("TIME", w_time, Alignment::Right), hdr_style()),
+        Span::raw(" "),
+        Span::styled("COMMAND", hdr_style()),
+    ]));
+    lines.push(hrule(iw)); // 表头下粗横线
+
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut prev: Option<String> = None;
     for p in &snap.gpu_procs {
         if let Some(pv) = &prev {
             if pv != &p.gpu {
-                lines.push(grid_rule(iw));
+                lines.push(Line::from(Span::styled("─".repeat(iw), dim()))); // 卡间细横线
             }
         }
         prev = Some(p.gpu.clone());
@@ -600,21 +592,24 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
             (format!("{}%", p.sm), pct_style(pi(&p.sm)))
         };
         let cmd = truncate_w(&crate::parse::shorten_cmd(&p.cmd, home()), cmd_avail);
-        let cells: [(String, Style); 7] = [
-            (pad(&show_g, GP_W[0], Alignment::Center), Style::default().add_modifier(Modifier::BOLD)),
-            (pad(&p.pid, GP_W[1], Alignment::Right), base),
-            (pad(&p.user, GP_W[2], Alignment::Left), base),
-            (pad(&sm_txt, GP_W[3], Alignment::Right), sm_st),
-            (pad(&format!("{}M", p.fb), GP_W[4], Alignment::Right), Style::default().fg(Color::Cyan)),
-            (pad(&format!("{}%", p.pcpu), GP_W[5], Alignment::Right), base),
-            (pad(&p.etime, GP_W[6], Alignment::Right), dim()),
+        let spans: Vec<Span> = vec![
+            Span::raw(" "),
+            Span::styled(pad(&show_g, 1, Alignment::Center), Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(pad(&p.pid, w_pid, Alignment::Right), base),
+            Span::raw(" "),
+            Span::styled(pad(&p.user, w_user, Alignment::Left), base),
+            Span::raw(" "),
+            Span::styled(pad(&sm_txt, w_gpu, Alignment::Right), sm_st),
+            Span::raw(" "),
+            Span::styled(pad(&format!("{}M", p.fb), w_vram, Alignment::Right), Style::default().fg(Color::Cyan)),
+            Span::raw(" "),
+            Span::styled(pad(&format!("{}%", p.pcpu), w_cpu, Alignment::Right), base),
+            Span::raw(" "),
+            Span::styled(pad(&p.etime, w_time, Alignment::Right), dim()),
+            Span::raw(" "),
+            Span::styled(cmd, base),
         ];
-        let mut spans: Vec<Span> = vec![Span::raw(" ")];
-        for (txt, st) in cells {
-            spans.push(Span::styled(txt, st));
-            spans.push(sep());
-        }
-        spans.push(Span::styled(cmd, base));
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
