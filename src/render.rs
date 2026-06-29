@@ -161,7 +161,7 @@ fn me_style(user: &str, me: &str) -> Option<Style> {
     }
 }
 
-pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, host: &str, now: &str) {
+pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, host: &str, now: &str, paused: bool) {
     let area = f.area();
     let w = area.width as usize;
     let h = area.height as usize;
@@ -195,7 +195,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
             .split(area);
-        render_header(f, chunks[0], host, now);
+        render_header(f, chunks[0], host, now, paused);
         let n = h.saturating_sub(6).max(3);
         let mut procs: Vec<&CpuProc> = snap.cpu_procs.iter().collect();
         if rev {
@@ -207,8 +207,9 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         let inner_w = chunks[1].width.saturating_sub(2) as usize;
         let lines = cpu_lines(&procs[..shown], me, true, inner_w);
         f.render_widget(Paragraph::new(lines).block(panel(&title, Color::Blue)), chunks[1]);
+        let pk = if paused { "[p] 继续" } else { "[p] 暂停" };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled("  [c] 返回   [r] 反序   [q] 退出", dim()))),
+            Paragraph::new(Line::from(Span::styled(format!("  [c] 返回   [r] 反序   {}   [q] 退出", pk), dim()))),
             chunks[2],
         );
         return;
@@ -252,7 +253,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     cons.push(Constraint::Length(1));
     let chunks = Layout::default().direction(Direction::Vertical).constraints(cons).split(area);
 
-    render_header(f, chunks[0], host, now);
+    render_header(f, chunks[0], host, now, paused);
     render_top(f, chunks[1], snap, side_by_side);
     render_gpu_procs(f, chunks[2], snap, me);
     if cpu_panel_h > 0 {
@@ -262,18 +263,24 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         f.render_widget(Paragraph::new(lines).block(panel("CPU 进程 Top 10", Color::Blue)), chunks[3]);
     }
     let hint = chunks.last().unwrap();
+    let pk = if paused { "[p] 继续" } else { "[p] 暂停" };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled("  [c] 只看CPU进程   [q] 退出", dim()))),
+        Paragraph::new(Line::from(Span::styled(format!("  [c] 只看CPU进程   {}   [q] 退出", pk), dim()))),
         *hint,
     );
 }
 
-fn render_header(f: &mut Frame, area: Rect, host: &str, now: &str) {
+fn render_header(f: &mut Frame, area: Rect, host: &str, now: &str, paused: bool) {
     let left = Line::from(vec![
         Span::styled("wcn2", hdr_style()),
         Span::styled(format!(" @ {}", host), dim()),
     ]);
-    let right = Line::from(Span::styled(format!("{}  ·  刷新 0.8s", now), dim())).alignment(Alignment::Right);
+    let tail = if paused {
+        Span::styled("⏸ 已暂停", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("刷新 0.8s", dim())
+    };
+    let right = Line::from(vec![Span::styled(format!("{}  ·  ", now), dim()), tail]).alignment(Alignment::Right);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -681,7 +688,8 @@ mod tests {
     fn draw(snap: &Snapshot, w: u16, h: u16, mode: Mode, rev: bool) {
         let backend = TestBackend::new(w, h);
         let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| render(f, snap, mode, rev, "u", "host", "2026-06-30 00:00:00"))
+        let paused = rev; // 顺带覆盖 paused 两种取值
+        term.draw(|f| render(f, snap, mode, rev, "u", "host", "2026-06-30 00:00:00", paused))
             .unwrap();
     }
 

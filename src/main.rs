@@ -79,21 +79,31 @@ fn main() -> io::Result<()> {
 
     let mut mode = Mode::Full;
     let mut rev = false;
-    let mut last: Option<(u64, u16, u16, bool, bool)> = None;
+    let mut paused = false;
+    // 当前显示的快照(暂停时冻结:不再拉新数据,连时钟一起定格)
+    let mut cur: Option<(Snapshot, u64, String)> = None;
+    let mut last: Option<(u64, u16, u16, bool, bool, bool)> = None;
 
     loop {
-        // 正常只画差异(不清屏,故不闪);花屏的根源是尺寸变化,由下方 Resize 清屏处理。
-        let (snap_opt, ver) = {
-            let g = shared.lock().unwrap();
-            (g.0.clone(), g.1)
-        };
-        if let Some(snap) = &snap_opt {
+        // 未暂停时拉取最新快照(连同采集时刻的时钟一起存);暂停时保持冻结
+        if !paused {
+            let (snap_opt, ver) = {
+                let g = shared.lock().unwrap();
+                (g.0.clone(), g.1)
+            };
+            if let Some(snap) = snap_opt {
+                if cur.as_ref().map(|c| c.1) != Some(ver) {
+                    cur = Some((snap, ver, now_str()));
+                }
+            }
+        }
+
+        if let Some((snap, ver, now)) = &cur {
             let size = terminal.size()?;
-            let key = (ver, size.width, size.height, matches!(mode, Mode::Cpu), rev);
+            let key = (*ver, size.width, size.height, matches!(mode, Mode::Cpu), rev, paused);
             if last != Some(key) {
                 last = Some(key);
-                let now = now_str();
-                terminal.draw(|f| render::render(f, snap, mode, rev, &me, &host, &now))?;
+                terminal.draw(|f| render::render(f, snap, mode, rev, &me, &host, now, paused))?;
             }
         }
 
@@ -111,11 +121,11 @@ fn main() -> io::Result<()> {
                             }
                         }
                         KeyCode::Char('r') => rev = !rev,
+                        KeyCode::Char('p') => paused = !paused, // 定格 / 继续
                         _ => {}
                     }
                 }
                 Event::Resize(_, _) => {
-                    // 尺寸变化(含改字号):清屏强制全量重绘,避免残留花屏
                     terminal.clear()?;
                     last = None;
                 }
