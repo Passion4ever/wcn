@@ -80,8 +80,15 @@ fn main() -> io::Result<()> {
     let mut mode = Mode::Full;
     let mut rev = false;
     let mut last: Option<(u64, u16, u16, bool, bool)> = None;
+    let mut last_heal = std::time::Instant::now();
 
     loop {
+        // 定期强制全屏重绘:治外部干扰/字体变化造成的花屏(ratatui 默认只画差异,不会自愈)
+        if last_heal.elapsed() >= Duration::from_secs(2) {
+            terminal.clear()?;
+            last = None;
+            last_heal = std::time::Instant::now();
+        }
         let (snap_opt, ver) = {
             let g = shared.lock().unwrap();
             (g.0.clone(), g.1)
@@ -97,8 +104,8 @@ fn main() -> io::Result<()> {
         }
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat => {
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
                     match k.code {
                         KeyCode::Char('q') => break,
@@ -113,8 +120,13 @@ fn main() -> io::Result<()> {
                         _ => {}
                     }
                 }
+                Event::Resize(_, _) => {
+                    // 尺寸变化(含改字号):清屏强制全量重绘,避免残留花屏
+                    terminal.clear()?;
+                    last = None;
+                }
+                _ => {}
             }
-            // Resize 等其它事件:下一轮 size 变化会触发重绘
         }
     }
     Ok(())
