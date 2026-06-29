@@ -351,23 +351,83 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(table, area);
 }
 
+// 固定列宽(字符)。最后一列 COMMAND 占剩余宽度。
+const GP_W: [usize; 7] = [3, 7, 9, 5, 7, 5, 7]; // GPU PID USER GPU% VRAM CPU% TIME
+
+/// 按对齐把内容补齐到固定宽(ASCII 列;按 char 数)。超长截断。
+fn pad(s: &str, w: usize, align: Alignment) -> String {
+    let n = s.chars().count();
+    if n >= w {
+        return s.chars().take(w).collect();
+    }
+    let sp = w - n;
+    match align {
+        Alignment::Right => format!("{}{}", " ".repeat(sp), s),
+        Alignment::Center => {
+            let l = sp / 2;
+            format!("{}{}{}", " ".repeat(l), s, " ".repeat(sp - l))
+        }
+        _ => format!("{}{}", s, " ".repeat(sp)),
+    }
+}
+
+/// 横线规则行(表头下 / 卡间分隔):── 与列竖线位置对齐的 ┼ 交叉,末尾铺满至 inner 宽。
+fn grid_rule(inner: usize) -> Line<'static> {
+    let mut s = String::new();
+    s.push_str(&"─".repeat(1 + GP_W[0] + 1)); // 前导空格 + 列 + 竖线前空格
+    for w in &GP_W[1..] {
+        s.push('┼');
+        s.push_str(&"─".repeat(1 + w + 1));
+    }
+    s.push('┼'); // COMMAND 前的交叉
+    let used = s.chars().count();
+    if inner > used {
+        s.push_str(&"─".repeat(inner - used));
+    }
+    Line::from(Span::styled(s.chars().take(inner).collect::<String>(), dim()))
+}
+
 fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
-    // 统计每卡进程数,用于卡号垂直居中
+    let block = panel("GPU 进程", Color::Yellow);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let iw = inner.width as usize;
+    let sep = || Span::styled(" │ ", dim());
+
+    // 每卡进程数(卡号垂直居中)
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for p in &snap.gpu_procs {
         *counts.entry(p.gpu.clone()).or_insert(0) += 1;
     }
-    let mut rows: Vec<Row> = Vec::new();
-    let sep = || {
-        Row::new(vec![Cell::from(Line::from(Span::styled("─".repeat(2), dim())))])
-            .style(dim())
-    };
+
+    let headers = ["GPU", "PID", "USER", "GPU%", "VRAM", "CPU%", "TIME"];
+    let aligns = [
+        Alignment::Center,
+        Alignment::Right,
+        Alignment::Left,
+        Alignment::Right,
+        Alignment::Right,
+        Alignment::Right,
+        Alignment::Right,
+    ];
+    let mut lines: Vec<Line> = Vec::new();
+
+    // 表头行
+    let mut hs: Vec<Span> = vec![Span::raw(" ")];
+    for i in 0..7 {
+        hs.push(Span::styled(pad(headers[i], GP_W[i], aligns[i]), HEADER_STYLE()));
+        hs.push(sep());
+    }
+    hs.push(Span::styled("COMMAND", HEADER_STYLE()));
+    lines.push(Line::from(hs));
+    lines.push(grid_rule(iw)); // 表头下横线
+
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut prev: Option<String> = None;
     for p in &snap.gpu_procs {
         if let Some(pv) = &prev {
             if pv != &p.gpu {
-                rows.push(sep());
+                lines.push(grid_rule(iw)); // 卡间横线
             }
         }
         prev = Some(p.gpu.clone());
@@ -375,42 +435,40 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
         *c += 1;
         let mid = (counts[&p.gpu] + 1) / 2;
         let show_g = if *c == mid { p.gpu.clone() } else { String::new() };
-        let me_style = if p.user == me {
+        let base = if p.user == me {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
-        let sm_cell = if p.sm == "-" || p.sm.is_empty() {
-            r_cell("-".into(), dim())
+        let sm_style = if p.sm == "-" || p.sm.is_empty() {
+            dim()
         } else {
-            r_cell(format!("{}%", p.sm), pct_style(pi(&p.sm)))
+            pct_style(pi(&p.sm))
         };
-        rows.push(Row::new(vec![
-            Cell::from(Line::from(Span::styled(show_g, Style::default().add_modifier(Modifier::BOLD))).alignment(Alignment::Center)),
-            r_cell(p.pid.clone(), Style::default()),
-            l_cell(p.user.clone(), Style::default()),
-            sm_cell,
-            r_cell(format!("{}M", p.fb), Style::default().fg(Color::Cyan)),
-            r_cell(format!("{}%", p.pcpu), Style::default()),
-            r_cell(p.etime.clone(), dim()),
-            l_cell(crate::parse::shorten_cmd(&p.cmd, home()), Style::default()),
-        ]).style(me_style));
+        let sm_txt = if p.sm == "-" || p.sm.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{}%", p.sm)
+        };
+        let cmd = crate::parse::shorten_cmd(&p.cmd, home());
+        let cells: [(String, Style); 7] = [
+            (pad(&show_g, GP_W[0], Alignment::Center), Style::default().add_modifier(Modifier::BOLD)),
+            (pad(&p.pid, GP_W[1], Alignment::Right), base),
+            (pad(&p.user, GP_W[2], Alignment::Left), base),
+            (pad(&sm_txt, GP_W[3], Alignment::Right), sm_style),
+            (pad(&format!("{}M", p.fb), GP_W[4], Alignment::Right), Style::default().fg(Color::Cyan)),
+            (pad(&format!("{}%", p.pcpu), GP_W[5], Alignment::Right), base),
+            (pad(&p.etime, GP_W[6], Alignment::Right), dim()),
+        ];
+        let mut spans: Vec<Span> = vec![Span::raw(" ")];
+        for (txt, st) in cells {
+            spans.push(Span::styled(txt, st));
+            spans.push(sep());
+        }
+        spans.push(Span::styled(cmd, base)); // 末列,超出由 Paragraph 截断
+        lines.push(Line::from(spans));
     }
-    let widths = [
-        Constraint::Length(4),
-        Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Length(6),
-        Constraint::Length(7),
-        Constraint::Fill(1),
-    ];
-    let table = Table::new(rows, widths)
-        .header(Row::new(vec!["GPU", "PID", "USER", "GPU%", "VRAM", "CPU%", "TIME", "COMMAND"]).style(HEADER_STYLE()))
-        .column_spacing(1)
-        .block(panel("GPU 进程", Color::Yellow));
-    f.render_widget(table, area);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn cpu_table<'a>(procs: &[&CpuProc], me: &str, with_swap: bool) -> Table<'a> {
