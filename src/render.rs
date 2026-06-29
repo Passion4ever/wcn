@@ -400,26 +400,90 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
         return;
     }
     let show_membar = iw >= 80;
-    // 列宽:GPU3 名称10 显存用量(fill) 利用率6 温度6 功耗9;5 个列间隔 + 前导1
-    let wmem = iw.saturating_sub(40).max(8);
-    let sp = || Span::raw(" ");
+    let headers = ["卡号", "名称", "显存用量", "利用率", "温度", "功耗"];
+    let aligns = [
+        Alignment::Center,
+        Alignment::Left,
+        Alignment::Left,
+        Alignment::Right,
+        Alignment::Right,
+        Alignment::Right,
+    ];
+    // 各 GPU 的文本(用于算列宽)
+    let gb_of = |g: &crate::parse::Gpu| format!("{}/{}G", g.mu / 1024, g.mt / 1024);
+    let max_gb = snap.gpus.iter().map(|g| str_w(&gb_of(g))).max().unwrap_or(5);
+    let vram_content = if show_membar { 11 + max_gb } else { max_gb }; // 块条10+空格1+GB
+    // 列内容宽 = max(表头, 各行)
+    let mut w = [0usize; 6];
+    for (i, hdr) in headers.iter().enumerate() {
+        w[i] = str_w(hdr);
+    }
+    for g in &snap.gpus {
+        w[0] = w[0].max(str_w(&g.idx));
+        w[1] = w[1].max(str_w(&g.name));
+        w[2] = w[2].max(vram_content);
+        w[3] = w[3].max(str_w(&format!("{}%", g.util)));
+        w[4] = w[4].max(str_w(&format!("{}°C", g.temp)));
+        w[5] = w[5].max(str_w(&format!("{}/{}W", g.pw, g.plim)));
+    }
+    // 剩余宽度做成列间等间距(左右各留 1)
+    let content_sum: usize = w.iter().sum();
+    let avail = iw.saturating_sub(content_sum + 2);
+    let ngaps = 5usize;
+    let gap = (avail / ngaps).max(1);
+    let extra = if avail >= ngaps { avail % ngaps } else { 0 };
+    let gap_at = |i: usize| " ".repeat(gap + if i < extra { 1 } else { 0 });
+
+    // 单格 → 多 span(显存用量含块条;其余单 span 已对齐补齐)
+    let cell_spans = |i: usize, text_spans: Vec<Span<'static>>, cur_w: usize| -> Vec<Span<'static>> {
+        // text_spans 已是该列内容;补齐到 w[i](按对齐)
+        let pad_n = w[i].saturating_sub(cur_w);
+        let mut out = Vec::new();
+        match aligns[i] {
+            Alignment::Right => {
+                if pad_n > 0 {
+                    out.push(Span::raw(" ".repeat(pad_n)));
+                }
+                out.extend(text_spans);
+            }
+            Alignment::Center => {
+                let l = pad_n / 2;
+                if l > 0 {
+                    out.push(Span::raw(" ".repeat(l)));
+                }
+                out.extend(text_spans);
+                if pad_n - l > 0 {
+                    out.push(Span::raw(" ".repeat(pad_n - l)));
+                }
+            }
+            _ => {
+                out.extend(text_spans);
+                if pad_n > 0 {
+                    out.push(Span::raw(" ".repeat(pad_n)));
+                }
+            }
+        }
+        out
+    };
+    let assemble = |cells: Vec<Vec<Span<'static>>>| -> Vec<Span<'static>> {
+        let mut spans = vec![Span::raw(" ")];
+        for (i, c) in cells.into_iter().enumerate() {
+            spans.extend(c);
+            if i < 5 {
+                spans.push(Span::raw(gap_at(i)));
+            }
+        }
+        spans
+    };
 
     let mut lines: Vec<Line> = Vec::new();
-    // 表头(对齐与数据一致)
-    lines.push(Line::from(vec![
-        sp(),
-        Span::styled(pad("GPU", 3, Alignment::Center), hdr_style()),
-        sp(),
-        Span::styled(pad("名称", 10, Alignment::Left), hdr_style()),
-        sp(),
-        Span::styled(pad("显存用量", wmem, Alignment::Left), hdr_style()),
-        sp(),
-        Span::styled(pad("利用率", 6, Alignment::Right), hdr_style()),
-        sp(),
-        Span::styled(pad("温度", 6, Alignment::Right), hdr_style()),
-        sp(),
-        Span::styled(pad("功耗", 9, Alignment::Right), hdr_style()),
-    ]));
+    // 表头
+    let head_cells: Vec<Vec<Span>> = (0..6)
+        .map(|i| {
+            cell_spans(i, vec![Span::styled(headers[i].to_string(), hdr_style())], str_w(headers[i]))
+        })
+        .collect();
+    lines.push(Line::from(assemble(head_cells)));
     lines.push(hrule(iw));
 
     for g in &snap.gpus {
@@ -430,37 +494,32 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         };
-        // 显存用量单元格:块条 + GB,补到 wmem 宽
+        // 显存用量:块条 + GB
+        let gb = gb_of(g);
         let mut vram: Vec<Span> = Vec::new();
-        let mut vw = 0usize;
+        let mut vw = 0;
         if show_membar {
             vram.extend(cell_bar(mratio as f64, 10));
             vram.push(Span::raw(" "));
             vw += 11;
         }
-        let gb = format!("{}/{}G", g.mu / 1024, g.mt / 1024);
         vw += str_w(&gb);
         vram.push(Span::styled(gb, pct_style(mratio as f64)));
-        if wmem > vw {
-            vram.push(Span::raw(" ".repeat(wmem - vw)));
-        }
-        let pw_pct = if g.plim > 0 { (g.pw * 100 / g.plim) as f64 } else { 0.0 };
-        let mut spans: Vec<Span> = vec![
-            sp(),
-            Span::styled(pad(&g.idx, 3, Alignment::Center), idx_style),
-            sp(),
-            Span::styled(pad(&g.name, 10, Alignment::Left), Style::default()),
-            sp(),
+
+        let cells: Vec<Vec<Span>> = vec![
+            cell_spans(0, vec![Span::styled(g.idx.clone(), idx_style)], str_w(&g.idx)),
+            cell_spans(1, vec![Span::styled(g.name.clone(), Style::default())], str_w(&g.name)),
+            cell_spans(2, vram, vw),
+            cell_spans(3, vec![Span::styled(format!("{}%", g.util), pct_style(g.util as f64))], str_w(&format!("{}%", g.util))),
+            cell_spans(4, vec![Span::styled(format!("{}°C", g.temp), temp_style(g.temp))], str_w(&format!("{}°C", g.temp))),
+            {
+                let pw_pct = if g.plim > 0 { (g.pw * 100 / g.plim) as f64 } else { 0.0 };
+                let t = format!("{}/{}W", g.pw, g.plim);
+                let cw = str_w(&t);
+                cell_spans(5, vec![Span::styled(t, pct_style(pw_pct))], cw)
+            },
         ];
-        spans.extend(vram);
-        spans.extend([
-            sp(),
-            Span::styled(pad(&format!("{}%", g.util), 6, Alignment::Right), pct_style(g.util as f64)),
-            sp(),
-            Span::styled(pad(&format!("{}°C", g.temp), 6, Alignment::Right), temp_style(g.temp)),
-            sp(),
-            Span::styled(pad(&format!("{}/{}W", g.pw, g.plim), 9, Alignment::Right), pct_style(pw_pct)),
-        ]);
+        let mut spans = assemble(cells);
         if crit {
             for s in spans.iter_mut() {
                 s.style = s.style.add_modifier(Modifier::REVERSED);
