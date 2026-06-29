@@ -126,7 +126,7 @@ fn main() -> io::Result<()> {
                     }
                 }
                 Event::Resize(_, _) => {
-                    terminal.clear()?;
+                    // 不清屏(清屏会闪);ratatui draw() 内部按新尺寸自动重排,只需触发一次重绘
                     last = None;
                 }
                 _ => {}
