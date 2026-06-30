@@ -38,6 +38,8 @@ pub struct Snapshot {
     pub mem: (f64, f64),
     pub swap: (f64, f64, bool),
     pub net: (f64, f64),
+    pub driver: String,
+    pub cuda: String,
 }
 
 fn run(args: &[&str]) -> String {
@@ -50,6 +52,29 @@ fn run(args: &[&str]) -> String {
 
 fn read_file(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_default()
+}
+
+/// 启动时查一次:从 nvidia-smi 表头解析 (驱动版本, CUDA 版本)。无则空串。
+pub fn read_driver_cuda() -> (String, String) {
+    let out = run(&["nvidia-smi"]);
+    let after = |line: &str, key: &str| -> String {
+        line.find(key)
+            .and_then(|p| line[p + key.len()..].split_whitespace().next())
+            .unwrap_or("")
+            .trim_end_matches('|')
+            .to_string()
+    };
+    let mut drv = String::new();
+    let mut cuda = String::new();
+    for line in out.lines() {
+        if drv.is_empty() {
+            drv = after(line, "Driver Version:");
+        }
+        if cuda.is_empty() {
+            cuda = after(line, "CUDA Version:");
+        }
+    }
+    (drv, cuda)
 }
 
 /// 按空白把一行切成至多 n 段,最后一段保留余下(含空格),模拟 Python str.split(None, n-1)。
@@ -207,16 +232,21 @@ pub struct Sampler {
     prev_vm: (i64, i64),
     prev_j: HashMap<String, i64>,
     t_prev: Instant,
+    driver: String, // 静态,启动查一次
+    cuda: String,
 }
 
 impl Sampler {
     pub fn new() -> Self {
+        let (driver, cuda) = read_driver_cuda();
         Sampler {
             prev_stat: parse_proc_stat(&read_file("/proc/stat")),
             prev_net: parse_net_dev(&read_file("/proc/net/dev")),
             prev_vm: parse_vmstat(&read_file("/proc/vmstat")),
             prev_j: read_proc_jiffies(),
             t_prev: Instant::now(),
+            driver,
+            cuda,
         }
     }
 
@@ -254,6 +284,8 @@ impl Sampler {
             mem: (mu, mt),
             swap: (sw_used, sw_total, sw_io > 0.5),
             net,
+            driver: self.driver.clone(),
+            cuda: self.cuda.clone(),
         }
     }
 }

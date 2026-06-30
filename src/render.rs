@@ -391,7 +391,14 @@ fn render_sys(f: &mut Frame, area: Rect, snap: &Snapshot) {
 }
 
 fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
-    let block = panel("GPU", Color::Green);
+    let title = if snap.driver.is_empty() {
+        "GPU".to_string()
+    } else if snap.cuda.is_empty() {
+        format!("GPU · 驱动 {}", snap.driver)
+    } else {
+        format!("GPU · 驱动 {} · CUDA {}", snap.driver, snap.cuda)
+    };
+    let block = panel(&title, Color::Green);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let iw = inner.width as usize;
@@ -736,6 +743,8 @@ mod tests {
             mem: (98.0, 256.0),
             swap: (sw_total * 0.4, sw_total, sw_total > 0.0),
             net: (1.0, 2.0),
+            driver: "570.211.01".into(),
+            cuda: "12.8".into(),
         }
     }
 
