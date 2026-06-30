@@ -1536,7 +1536,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "wcn2"
+name = "wcn"
 version = "0.1.0"
 dependencies = [
  "crossterm",

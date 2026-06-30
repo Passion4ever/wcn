@@ -1,47 +1,89 @@
-# wcn2-rs — wcn2 的 Rust 重写
+# wcn
 
-终端 GPU + 系统监控的 Rust 版,产出**单个静态二进制**,`scp` 到任何 x86_64 Linux 即可运行,
-无需 Python/conda/任何环境。行为对齐 Python 版(`/home/user01/wcn2/wcn2.py`)。
+终端里的 **GPU + 系统监控**,`top` 与 `nvidia-smi` 的合体。一屏看清:GPU 状态、CPU/内存/网速、谁在占资源。
 
-## 构建(本机走 socks5h 代理)
+- **单个静态二进制**:`scp` 到任何 x86_64 Linux 直接跑,不依赖 Python / CUDA toolkit / 任何环境。
+- **不闪刷新**、自适应终端宽高、自动适配深/浅色主题。
+- Rust + [ratatui](https://github.com/ratatui/ratatui) 实现,~1.3MB,启动快、CPU 占用低。
 
-```bash
-# 一次性:工具链 + musl target(走 socks5h)
-curl --proxy socks5h://USER:PASS@127.0.0.1:2080 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-# ~/.cargo/config.toml 里设 [http] proxy = "socks5h://USER:PASS@127.0.0.1:2080"
-rustup target add x86_64-unknown-linux-musl
+> 个人自用项目。GPU 数据来自 `nvidia-smi`;CPU/内存/网速读 `/proc`。
 
-# 构建静态二进制
-cargo build --release --target x86_64-unknown-linux-musl
-# 产物:target/x86_64-unknown-linux-musl/release/wcn2 (~1.3M, statically linked)
+## 界面
+
+```
+wcn @ 主机名                                          2026-06-30 12:00:00  ·  刷新 0.8s
+╭ 系统 ──────────────╮ ╭ GPU · 驱动 570.211.01 · CUDA 12.8 ───────────────────────────╮
+│ CPU  ━━━━╸━━━━  14% │ │ 卡号   名称       显存用量        利用率   温度    功耗       │
+│ 内存 ━━━━━━━╸ 254G  │ │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │
+│ 交换 ━━╸━━━  22/61G │ │  0    A800 80GB  ██████████ 79/80G   89%    58°C  90/300W    │
+│ 网络 ↓0.1 ↑0.1 MB/s │ │  ...                                                         │
+╰─────────────────────╯ ╰──────────────────────────────────────────────────────────────╯
+╭ GPU 进程 ───────────────────────────────────────────────────────────────────────────╮
+│      PID USER     GPU%   VRAM CPU%   TIME COMMAND                                     │
+│━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━│
+│ 0 ...  (只列占着 GPU 的进程,按卡分组,卡号在每组中间)                                │
+╰───────────────────────────────────────────────────────────────────────────────────╯
+╭ CPU 进程 Top 10 ────────────────────────────────────────────────────────────────────╮
+│ ...  (按瞬时 CPU% 降序)                                                              │
+╰───────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-`ldd` 应显示 `statically linked` —— 可直接 `scp` 到任何 Linux 运行。
+- **系统**:CPU 利用率、内存 用/总、(有 swap 时)交换、网速 ↓↑;进度条按阈值绿/黄/红。
+  交换行:灰=空、黄=占着、红+`⇅`=**正在换页**(性能在被拖累)。
+- **GPU 概览**:每卡 显存用量(条+GB)、利用率、温度、功耗;标题带驱动/CUDA 版本;**温度 ≥85°C 整行高亮**。
+- **GPU 进程**:只列占着 GPU 的进程,按卡分组;`VRAM`=进程占的显存。
+- **CPU 进程**:按**瞬时** CPU% 降序(读 `/proc/<pid>/stat` 增量,非 ps 生命周期均值);
+  `RES`=系统内存,`TIME`=运行时长。
+- **自己的进程**整行高亮;命令自动瘦身(去解释器路径、家目录折叠 `~`)。
 
-## 依赖
+## 按键
 
-- ratatui + crossterm(纯 Rust;musl 全静态无需 C 编译器)。
-- 运行时:`nvidia-smi`(GPU 数据,v1 走子进程;v2 计划改 NVML)、`ps`、`date`、`/proc`。
+| 键 | 作用 |
+|----|------|
+| `c` | 切到 / 切回 **CPU 单页**(只看 CPU 进程,铺满高度,多一列 `SWAP` 定位谁在占交换) |
+| `r` | 反序(**仅 CPU 单页**:CPU% 降序 ⇄ 升序) |
+| `p` | **定格 / 继续**(冻结画面与时钟,显示 `⏸ 已暂停`) |
+| `q` / `Ctrl-C` | 退出 |
 
-## 按键 / 界面
+## 安装
 
-与 Python 版一致:`c` 切 CPU 单页(多 SWAP 列)、`r` 反序(仅 CPU 单页)、`q`/`Ctrl-C` 退出。
-面板:状态栏、系统(CPU/内存/交换/网速)、GPU 概览、GPU 进程(按卡分组)、CPU 进程。
-自适应宽高 + 最小尺寸兜底;配色相对主题(深浅自适应)。
+### 下载预编译二进制(推荐)
 
-## 模块
+到 [Releases](https://github.com/Passion4ever/wcn/releases) 下载 `wcn`,然后:
 
-- `parse.rs` — 纯解析/格式化(无 IO),含单测。
-- `collect.rs` — 采样,组装 `Snapshot`(瞬时 CPU%、per-proc swap)。
-- `render.rs` — ratatui 渲染,含 TestBackend 冒烟。
-- `main.rs` — 事件循环 / 后台采样线程 / 终端守卫。
+```bash
+chmod +x wcn
+mv wcn ~/.local/bin/        # 确保 ~/.local/bin 在 PATH 里
+wcn
+```
+
+静态链接,任何 x86_64 Linux 直接跑,无需额外依赖。运行时需要 `nvidia-smi`(看 GPU)、`ps`。
+
+### 从源码构建
+
+需要 Rust 工具链:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+# 产物:target/x86_64-unknown-linux-musl/release/wcn
+```
+
+> 若在受限网络/代理后构建,给 cargo 配置代理即可(`~/.cargo/config.toml` 里设 `[http] proxy = "..."`)。
+
+## 自适应
+
+- **宽度**:窄了系统面板堆到上方、GPU 概览的显存条自动省略、命令列按宽省略(`…`);
+  小到放不下时显示"窗口太小,建议至少 …"。
+- **高度**:CPU 进程行数按剩余高度伸缩,放不下不显示,提示行始终保留。
+- **主题**:配色相对终端主题(`dim` + 语义色 + 反色),深/浅/任意配色都自动协调。
 
 ## 测试
 
 ```bash
-cargo test    # 15 项:纯函数单测 + 渲染冒烟
+cargo test    # 纯解析函数单测 + 渲染冒烟
 ```
 
-## 状态
+## 许可
 
-v1 功能完整、与 Python 版行为对齐(细节视觉仍在对照打磨)。NVML 提速为 v2。
+个人自用,MIT。

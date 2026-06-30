@@ -272,7 +272,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
 
 fn render_header(f: &mut Frame, area: Rect, host: &str, now: &str, paused: bool) {
     let left = Line::from(vec![
-        Span::styled("wcn2", hdr_style()),
+        Span::styled("wcn", hdr_style()),
         Span::styled(format!(" @ {}", host), dim()),
     ]);
     let tail = if paused {
