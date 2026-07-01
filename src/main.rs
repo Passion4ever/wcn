@@ -55,12 +55,36 @@ fn main() -> io::Result<()> {
         .unwrap_or_else(|_| "?".into());
     let host = read_host();
 
-    // 后台采样线程 → 共享 (最新快照, 版本号)
+    // CUDA 版本(慢,~0.8s)+ 最新快照,都由后台线程写、主线程读。
+    // 驱动版本已折进每帧 GPU 查询,立即显示、无需慢调用。
+    let cuda: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let shared: Arc<Mutex<(Option<Snapshot>, u64)>> = Arc::new(Mutex::new((None, 0)));
+
+    // CUDA 版本:query-gpu 无此字段,只能 nvidia-smi -q(~0.8s)。独立线程拉,且
+    // **等首帧出屏后再跑**——否则和首次采样的 nvidia-smi 争用驱动,拖慢进入。就绪后飘进标题。
+    {
+        let cuda = cuda.clone();
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            loop {
+                if shared.lock().unwrap().1 >= 1 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            let v = collect::read_cuda_version();
+            *cuda.lock().unwrap() = v;
+        });
+    }
+
+    // 后台采样线程 → 共享 (最新快照, 版本号)
     {
         let shared = shared.clone();
         std::thread::spawn(move || {
-            let mut sampler = Sampler::new();
+            let mut sampler = Sampler::new(cuda);
+            // 预热:基线已在 new() 建好,睡一小会儿再出首帧,让首帧就有真实
+            // CPU%/网速(否则首帧两次采样间隔≈0,速率全是 0,会突兀跳一下)。
+            std::thread::sleep(Duration::from_millis(300));
             loop {
                 // 每帧容错:采样 panic 也不弄垮线程,保留上一帧
                 if let Ok(snap) = std::panic::catch_unwind(AssertUnwindSafe(|| sampler.sample())) {

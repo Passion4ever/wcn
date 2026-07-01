@@ -3,6 +3,7 @@ use crate::parse::*;
 use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -54,27 +55,18 @@ fn read_file(path: &str) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
-/// 启动时查一次:从 nvidia-smi 表头解析 (驱动版本, CUDA 版本)。无则空串。
-pub fn read_driver_cuda() -> (String, String) {
-    let out = run(&["nvidia-smi"]);
-    let after = |line: &str, key: &str| -> String {
-        line.find(key)
-            .and_then(|p| line[p + key.len()..].split_whitespace().next())
-            .unwrap_or("")
-            .trim_end_matches('|')
-            .to_string()
-    };
-    let mut drv = String::new();
-    let mut cuda = String::new();
+/// CUDA 版本:query-gpu 无此字段,只能 `nvidia-smi -q`(~0.8s)。首帧后后台查一次。
+/// 行形如 "CUDA Version                              : 12.8"。无则空串。
+pub fn read_cuda_version() -> String {
+    let out = run(&["nvidia-smi", "-q"]);
     for line in out.lines() {
-        if drv.is_empty() {
-            drv = after(line, "Driver Version:");
-        }
-        if cuda.is_empty() {
-            cuda = after(line, "CUDA Version:");
+        if line.contains("CUDA Version") {
+            if let Some(v) = line.split(':').nth(1) {
+                return v.trim().to_string();
+            }
         }
     }
-    (drv, cuda)
+    String::new()
 }
 
 /// 按空白把一行切成至多 n 段,最后一段保留余下(含空格),模拟 Python str.split(None, n-1)。
@@ -133,14 +125,23 @@ pub fn read_proc_swap(pid: &str) -> i64 {
     0
 }
 
-pub fn read_gpus() -> Vec<Gpu> {
+/// 返回 (GPU 列表, 驱动版本)。driver_version 作为第 9 列塞进同一次查询,
+/// 几乎零额外成本(query 全程 ~0.05s),驱动版本每帧都有、不必走慢的 nvidia-smi。
+pub fn read_gpus() -> (Vec<Gpu>, String) {
     let out = run(&[
         "nvidia-smi",
         "--query-gpu=index,name,temperature.gpu,utilization.gpu,\
-         memory.used,memory.total,power.draw,power.limit",
+         memory.used,memory.total,power.draw,power.limit,driver_version",
         "--format=csv,noheader,nounits",
     ]);
-    parse_gpu_csv(&out)
+    let gpus = parse_gpu_csv(&out); // 只取前 8 列,自动忽略第 9 列
+    let driver = out
+        .lines()
+        .next()
+        .and_then(|l| l.split(',').nth(8)) // 驱动号节点全局,取首行第 9 列
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    (gpus, driver)
 }
 
 pub fn read_gpu_procs(
@@ -232,20 +233,19 @@ pub struct Sampler {
     prev_vm: (i64, i64),
     prev_j: HashMap<String, i64>,
     t_prev: Instant,
-    driver: String, // 静态,启动查一次
-    cuda: String,
+    // CUDA 版本:query-gpu 无此字段,只能走慢的 nvidia-smi -q,由独立线程后台填一次,
+    // 采样线程只读,永不被堵。就绪前空串(标题只显示 "GPU · 驱动 X")。
+    cuda: Arc<Mutex<String>>,
 }
 
 impl Sampler {
-    pub fn new() -> Self {
-        let (driver, cuda) = read_driver_cuda();
+    pub fn new(cuda: Arc<Mutex<String>>) -> Self {
         Sampler {
             prev_stat: parse_proc_stat(&read_file("/proc/stat")),
             prev_net: parse_net_dev(&read_file("/proc/net/dev")),
             prev_vm: parse_vmstat(&read_file("/proc/vmstat")),
             prev_j: read_proc_jiffies(),
             t_prev: Instant::now(),
-            driver,
             cuda,
         }
     }
@@ -268,7 +268,7 @@ impl Sampler {
         } else {
             0.0
         };
-        let gpus = read_gpus();
+        let (gpus, driver) = read_gpus();
         let gpu_procs = read_gpu_procs(&self.prev_j, &cur_j, dt);
         let cpu_procs = read_cpu_procs(&self.prev_j, &cur_j, dt, 50);
         self.prev_stat = cur_stat;
@@ -276,6 +276,7 @@ impl Sampler {
         self.prev_vm = cur_vm;
         self.prev_j = cur_j;
         self.t_prev = now;
+        let cuda = self.cuda.lock().unwrap().clone();
         Snapshot {
             gpus,
             gpu_procs,
@@ -284,8 +285,8 @@ impl Sampler {
             mem: (mu, mt),
             swap: (sw_used, sw_total, sw_io > 0.5),
             net,
-            driver: self.driver.clone(),
-            cuda: self.cuda.clone(),
+            driver,
+            cuda,
         }
     }
 }
