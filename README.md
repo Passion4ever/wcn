@@ -1,12 +1,13 @@
 # wcn
 
-终端里的 **GPU + 系统监控**,`top` 与 `nvidia-smi` 的合体。一屏看清:GPU 状态、CPU/内存/网速、谁在占资源。
+终端里的 GPU + 系统监控,`top` 与 `nvidia-smi` 的合体。单个二进制,通过 NVML 直连显卡、读 `/proc` 取系统指标,Rust + [ratatui](https://github.com/ratatui/ratatui) 实现。
 
-- **单个静态二进制**:`scp` 到任何 x86_64 Linux 直接跑,不依赖 Python / CUDA toolkit / 任何环境。
-- **不闪刷新**、自适应终端宽高、自动适配深/浅色主题。
-- Rust + [ratatui](https://github.com/ratatui/ratatui) 实现,~1.3MB,启动快、CPU 占用低。
+## 运行要求
 
-> 个人自用项目。GPU 数据来自 `nvidia-smi`;CPU/内存/网速读 `/proc`。
+- **Linux x86_64 + NVIDIA 驱动**:GPU 数据经驱动自带的 NVML 库读取,机器没装驱动就只显示系统面板。
+- **glibc ≥ 2.17**:即 CentOS 7 / Ubuntu 14.04 及以后,主流发行版都满足。
+  用 musl 的极简系统(如 Alpine)不支持——NVML 要动态加载,做不到全静态。
+- 另需 `ps`(看进程,几乎所有系统自带)。
 
 ## 界面
 
@@ -31,42 +32,15 @@
 
 ## 安装
 
-### 下载预编译二进制(推荐)
-
-到 [Releases](https://github.com/Passion4ever/wcn/releases) 下载 `wcn`,然后:
+到 [Releases](https://github.com/Passion4ever/wcn/releases) 下载 `wcn`,加执行权限后放进 PATH 里的目录:
 
 ```bash
 chmod +x wcn
-mv wcn ~/.local/bin/        # 确保 ~/.local/bin 在 PATH 里
+sudo mv wcn /usr/local/bin/   # 全局可用;或放 ~/.local/bin(需已在 $PATH 中)
 wcn
 ```
 
-静态链接,任何 x86_64 Linux 直接跑,无需额外依赖。运行时需要 `nvidia-smi`(看 GPU)、`ps`。
-
-### 从源码构建
-
-需要 Rust 工具链:
-
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-# 产物:target/x86_64-unknown-linux-musl/release/wcn
-```
-
-> 若在受限网络/代理后构建,给 cargo 配置代理即可(`~/.cargo/config.toml` 里设 `[http] proxy = "..."`)。
-
-## 自适应
-
-- **宽度**:窄了系统面板堆到上方、GPU 概览的显存条自动省略、命令列按宽省略(`…`);
-  小到放不下时显示"窗口太小,建议至少 …"。
-- **高度**:CPU 进程行数按剩余高度伸缩,放不下不显示,提示行始终保留。
-- **主题**:配色相对终端主题(`dim` + 语义色 + 反色),深/浅/任意配色都自动协调。
-
-## 测试
-
-```bash
-cargo test    # 纯解析函数单测 + 渲染冒烟
-```
+预编译二进制按 glibc 2.17 链接,满足「运行要求」的主流 Linux 直接跑。
 
 ## 许可
 
