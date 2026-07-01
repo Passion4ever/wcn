@@ -18,42 +18,9 @@ pub struct Gpu {
     pub plim: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Pmon {
-    pub gpu: String,
-    pub pid: String,
-    pub sm: String,
-    pub fb: String,
-}
-
 /// 安全转 int:浮点字符串/[N/A] 等转不动则 0(对应 Python _i)。
 pub fn pi(s: &str) -> i64 {
     s.trim().parse::<f64>().map(|x| x as i64).unwrap_or(0)
-}
-
-pub fn parse_gpu_csv(text: &str) -> Vec<Gpu> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let f: Vec<&str> = line.split(',').map(|x| x.trim()).collect();
-        if f.len() < 8 {
-            continue;
-        }
-        let name = f[1].replace("NVIDIA ", "").replace(" PCIe", "");
-        out.push(Gpu {
-            idx: f[0].to_string(),
-            name: name.trim().to_string(),
-            temp: pi(f[2]),
-            util: pi(f[3]),
-            mu: pi(f[4]),
-            mt: pi(f[5]),
-            pw: pi(f[6]),
-            plim: pi(f[7]),
-        });
-    }
-    out
 }
 
 /// (idle, total) from /proc/stat 首行 "cpu ..."。idle = idle + iowait。
@@ -160,25 +127,6 @@ pub fn parse_vmstat(text: &str) -> (i64, i64) {
     (si, so)
 }
 
-pub fn parse_pmon(text: &str) -> Vec<Pmon> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.starts_with('#') {
-            continue;
-        }
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() >= 11 && f[2] == "C" {
-            out.push(Pmon {
-                gpu: f[0].to_string(),
-                pid: f[1].to_string(),
-                sm: f[3].to_string(),
-                fb: f[9].to_string(),
-            });
-        }
-    }
-    out
-}
-
 /// 单进程瞬时 CPU%(可超 100,跨核累加)。缺前值/无间隔则 0。
 pub fn proc_cpu_pct(prev: Option<i64>, cur: Option<i64>, dt: f64) -> f64 {
     match (prev, cur) {
@@ -235,20 +183,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn t_gpu_csv() {
-        let g = parse_gpu_csv("0, NVIDIA A800 80GB PCIe, 45, 88, 62000, 81920, 280.5, 300.0\n");
-        assert_eq!(g.len(), 1);
-        assert_eq!(g[0].name, "A800 80GB");
-        assert_eq!((g[0].temp, g[0].util, g[0].pw, g[0].plim), (45, 88, 280, 300));
-    }
-
-    #[test]
-    fn t_gpu_csv_na() {
-        let g = parse_gpu_csv("0, NVIDIA A800, 45, [N/A], 100, 200, [N/A], 300\n");
-        assert_eq!((g[0].util, g[0].pw), (0, 0));
-    }
-
-    #[test]
     fn t_proc_stat_and_cpu() {
         let prev = parse_proc_stat("cpu  100 0 100 800 0 0 0 0\n");
         let cur = parse_proc_stat("cpu  200 0 200 1500 100 0 0 200\n");
@@ -289,18 +223,6 @@ mod tests {
     fn t_vmstat() {
         assert_eq!(parse_vmstat("nr_x 1\npswpin 1000\npswpout 2000\n"), (1000, 2000));
         assert_eq!(parse_vmstat(""), (0, 0));
-    }
-
-    #[test]
-    fn t_pmon_11_and_12col() {
-        let c11 = "# header\n    0   12345   C   88  5 0 0 0 0  60000  gmx\n    0  -  -  - - - - - -  -  -\n    1   67890   C   10  2 0 0 0 0  1200  py\n";
-        let r = parse_pmon(c11);
-        assert_eq!(r.len(), 2);
-        assert_eq!(r[0], Pmon { gpu: "0".into(), pid: "12345".into(), sm: "88".into(), fb: "60000".into() });
-        let c12 = "# header\n    0   12345   C   88  5 0 0 0 0  60000  0  train.py\n    2   99999   C   42  3 0 0 0 0  8192  0  python3\n";
-        let r2 = parse_pmon(c12);
-        assert_eq!(r2.len(), 2);
-        assert_eq!(r2[1], Pmon { gpu: "2".into(), pid: "99999".into(), sm: "42".into(), fb: "8192".into() });
     }
 
     #[test]
