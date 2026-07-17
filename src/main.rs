@@ -12,11 +12,68 @@ use ratatui::crossterm::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use render::Mode;
-use std::io::{self, Stdout};
+use std::cell::RefCell;
+use std::io::{self, Write};
 use std::panic::AssertUnwindSafe;
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// stdout 的阻塞/非阻塞开关。终端不排空时 write 会阻塞,主线程就会卡死在 draw 里
+/// (实测能卡 13 秒:按键失灵、还积压一堆过期帧)。非阻塞 + 自己冲刷可彻底避免。
+fn set_stdout_nonblocking(on: bool) {
+    unsafe {
+        let fl = libc::fcntl(libc::STDOUT_FILENO, libc::F_GETFL);
+        if fl < 0 {
+            return;
+        }
+        let new = if on {
+            fl | libc::O_NONBLOCK
+        } else {
+            fl & !libc::O_NONBLOCK
+        };
+        libc::fcntl(libc::STDOUT_FILENO, libc::F_SETFL, new);
+    }
+}
+
+/// 渲染字节先落到内存,draw() 因此永不阻塞;再由 flush_pending 非阻塞地送进 stdout。
+#[derive(Clone, Default)]
+struct Sink(Rc<RefCell<Vec<u8>>>);
+impl Write for Sink {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 尽量把 pending 冲进 stdout。返回是否冲完;WouldBlock 表示终端吃不下了,
+/// 剩下的留到下轮再冲(绝不阻塞)。
+fn flush_pending(pending: &mut Vec<u8>) -> io::Result<bool> {
+    while !pending.is_empty() {
+        let n = unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                pending.as_ptr() as *const libc::c_void,
+                pending.len(),
+            )
+        };
+        if n > 0 {
+            pending.drain(..n as usize);
+            continue;
+        }
+        let e = io::Error::last_os_error();
+        match e.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => return Ok(false),
+            _ => return Err(e),
+        }
+    }
+    Ok(true)
+}
 
 /// 终端状态守卫:进入 raw+备用屏,Drop 时(正常退出/panic 解栈)恢复。
 struct TermGuard;
@@ -24,11 +81,13 @@ impl TermGuard {
     fn new() -> io::Result<Self> {
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        set_stdout_nonblocking(true);
         Ok(TermGuard)
     }
 }
 impl Drop for TermGuard {
     fn drop(&mut self) {
+        set_stdout_nonblocking(false); // 先恢复阻塞,否则收尾的转义序列可能写不全
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
     }
@@ -93,20 +152,27 @@ fn main() -> io::Result<()> {
             // CPU%/网速(否则首帧两次采样间隔≈0,速率全是 0,会突兀跳一下)。
             std::thread::sleep(Duration::from_millis(300));
             loop {
+                let t = std::time::Instant::now();
                 // 每帧容错:采样 panic 也不弄垮线程,保留上一帧
                 if let Ok(snap) = std::panic::catch_unwind(AssertUnwindSafe(|| sampler.sample())) {
                     let mut g = shared.lock().unwrap();
                     g.0 = Some(snap);
                     g.1 += 1;
                 }
-                std::thread::sleep(Duration::from_millis(800));
+                // 减去采样自身耗时(实测约 120ms),让整体节奏真是标题写的 0.8s,
+                // 而不是 0.8s + 采样耗时 ≈ 1.0s。
+                std::thread::sleep(Duration::from_millis(800).saturating_sub(t.elapsed()));
             }
         });
     }
 
     let _guard = TermGuard::new()?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal: Terminal<CrosstermBackend<Stdout>> = Terminal::new(backend)?;
+    let sink = Sink::default();
+    let mut terminal: Terminal<CrosstermBackend<Sink>> =
+        Terminal::new(CrosstermBackend::new(sink.clone()))?;
+    // 已渲染但还没送进终端的字节。只有它空了才画下一帧 ——
+    // 这样既不阻塞,也不会积压过期帧,ratatui 的差分状态还始终与屏幕一致。
+    let mut pending: Vec<u8> = Vec::new();
 
     let mut mode = Mode::Full;
     let mut rev = false;
@@ -129,12 +195,19 @@ fn main() -> io::Result<()> {
             }
         }
 
-        if let Some((snap, ver, now)) = &cur {
-            let size = terminal.size()?;
-            let key = (*ver, size.width, size.height, matches!(mode, Mode::Cpu), rev, paused);
-            if last != Some(key) {
-                last = Some(key);
-                terminal.draw(|f| render::render(f, snap, mode, rev, &me, &host, now, paused))?;
+        // 先把上一帧没送完的续上;没送完就不画新帧(终端还没吃下,画了也只是积压过期画面)
+        flush_pending(&mut pending)?;
+
+        if pending.is_empty() {
+            if let Some((snap, ver, now)) = &cur {
+                let size = terminal.size()?;
+                let key = (*ver, size.width, size.height, matches!(mode, Mode::Cpu), rev, paused);
+                if last != Some(key) {
+                    last = Some(key);
+                    terminal.draw(|f| render::render(f, snap, mode, rev, &me, &host, now, paused))?;
+                    pending.append(&mut sink.0.borrow_mut()); // 取出这帧字节
+                    flush_pending(&mut pending)?;
+                }
             }
         }
 
