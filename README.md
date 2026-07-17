@@ -30,17 +30,33 @@
 | `p` | **定格 / 继续**(冻结画面与时钟,显示 `⏸ 已暂停`) |
 | `q` / `Ctrl-C` | 退出 |
 
-## 安装
+## 安装 / 更新
 
-到 [Releases](https://github.com/Passion4ever/wcn/releases) 下载 `wcn`,加执行权限后放进 PATH 里的目录:
+一行搞定。**装和更新是同一条命令**,想更新就再跑一遍:
 
 ```bash
-chmod +x wcn
-sudo mv wcn /usr/local/bin/   # 全局可用;或放 ~/.local/bin(需已在 $PATH 中)
-wcn
+curl -fsSL https://raw.githubusercontent.com/Passion4ever/wcn/main/install.sh | bash
 ```
 
-预编译二进制按 glibc 2.17 链接,满足「运行要求」的主流 Linux 直接跑。
+脚本会检查环境、自动选安装目录(能写 `/usr/local/bin` 就全局,否则 `~/.local/bin`)、
+已是最新则跳过;更新用原子替换,`wcn` 正开着也能换。
+
+访问 GitHub 需要代理时:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Passion4ever/wcn/main/install.sh \
+  | HTTPS_PROXY=socks5://127.0.0.1:1080 bash
+```
+
+不想跑脚本,手动装也行:
+
+```bash
+curl -fsSL https://github.com/Passion4ever/wcn/releases/latest/download/wcn -o wcn
+chmod +x wcn && mv wcn ~/.local/bin/        # 或 sudo mv wcn /usr/local/bin/
+```
+
+目标机连不上 GitHub,就在能联网的机器上下载后 `scp` 过去。
+预编译二进制按 glibc 2.17 链接,满足「运行要求」的主流 Linux 直接跑。查版本:`wcn --version`。
 
 ## 许可
 

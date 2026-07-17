@@ -1,6 +1,6 @@
 [package]
 name = "wcn"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "终端 GPU + 系统监控 (top + nvidia-smi 合体),单静态二进制"
 

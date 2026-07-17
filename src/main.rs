@@ -49,7 +49,33 @@ fn now_str() -> String {
         .unwrap_or_default()
 }
 
+/// --version / --help:打印后直接退出,不进 TUI。
+fn handle_args() -> bool {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("wcn {}", env!("CARGO_PKG_VERSION"));
+        return true;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "wcn {} — 终端 GPU + 系统监控\n\n\
+             用法:\n  \
+             wcn             启动监控界面\n  \
+             wcn --version   显示版本\n  \
+             wcn --help      显示本帮助\n\n\
+             界面按键:\n  \
+             c  只看 CPU 进程   r  反序   p  定格   q  退出",
+            env!("CARGO_PKG_VERSION")
+        );
+        return true;
+    }
+    false
+}
+
 fn main() -> io::Result<()> {
+    if handle_args() {
+        return Ok(());
+    }
     let me = std::env::var("USER")
         .or_else(|_| std::env::var("LOGNAME"))
         .unwrap_or_else(|_| "?".into());
