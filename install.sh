@@ -34,6 +34,56 @@ fi
 # raw 模式 + 备用屏。setsid 剥离控制终端,它打不开 /dev/tty,只能立刻报错退出。
 ver_of() { setsid timeout 5 "$1" --version 2>/dev/null </dev/null | awk '{print $2}' || true; }
 
+# alias 优先级高于 PATH,会完全盖住刚装的命令。脚本是子进程,删不掉父 shell 内存里的
+# alias(试过无效),只能检测 + 帮改配置文件;无论如何都得 source 或重开终端才生效。
+# 注意:即使"已是最新无需更新"也必须查 —— 那正是最让人懵的场景(装了却还是旧的)。
+check_alias() {
+  local out files f ans
+  out="$("${SHELL:-bash}" -ic 'type wcn' 2>/dev/null | grep -i alias || true)"
+  case "$out" in
+    *wcn*) ;;      # bash: "wcn is aliased to ..." / zsh: "wcn is an alias for ..."
+    *) return 0 ;;
+  esac
+
+  echo ""
+  echo "! 你的 shell 里 wcn 是一个 alias,它会盖过刚装的命令:"
+  echo "    $out"
+
+  files=""
+  for f in "$HOME/.bashrc" "$HOME/.bash_aliases" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+    [ -f "$f" ] || continue
+    grep -qE '^[[:space:]]*alias[[:space:]]+wcn=' "$f" 2>/dev/null && files="$files $f"
+  done
+
+  if [ -z "$files" ]; then
+    echo "  没找到它定义在哪个配置文件,请自行删除后重开终端。"
+    echo "  临时绕过:command wcn   或   \\wcn"
+    return 0
+  fi
+  echo "  定义在:$files"
+
+  if ! : 2>/dev/null < /dev/tty; then
+    echo "  (非交互,未自动处理)删掉该行后重开终端;临时绕过:command wcn"
+    return 0
+  fi
+
+  printf "  要帮你把这行注释掉吗? [y/N]: " > /dev/tty
+  read -r ans < /dev/tty || ans=""
+  echo "" > /dev/tty
+  case "$ans" in
+    y|Y|yes|YES)
+      for f in $files; do
+        sed -i -E 's/^([[:space:]]*alias[[:space:]]+wcn=)/# \1/' "$f"
+        echo "  ✓ 已注释掉 $f 里的 alias"
+      done
+      echo "  → 执行 source ~/.bashrc(或重开终端)后,wcn 才会指向新命令。"
+      ;;
+    *)
+      echo "  已保留 alias。临时绕过:command wcn   或   \\wcn"
+      ;;
+  esac
+}
+
 CUR=""
 if command -v wcn >/dev/null 2>&1; then
   CUR="$(ver_of "$(command -v wcn)")"   # 旧版取不到就是空,当作未知,继续装
@@ -43,6 +93,7 @@ LATEST="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev
 
 if [ -n "$CUR" ] && [ -n "$LATEST" ] && [ "$CUR" = "$LATEST" ]; then
   echo "✓ 已是最新版 $CUR($(command -v wcn)),无需更新。"
+  check_alias      # 已最新也要查:装了却敲不出来,正是最让人懵的情况
   exit 0
 fi
 
@@ -123,3 +174,6 @@ case ":$PATH:" in
     echo "    export PATH=\"$DIR:\$PATH\""
     ;;
 esac
+
+# --- 6. alias 冲突检测(函数定义在前面,装完 / 已最新 两条路径都会走) ---------
+check_alias
