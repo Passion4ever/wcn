@@ -41,6 +41,8 @@ pub struct Snapshot {
     pub mem: (f64, f64),
     pub swap: (f64, f64, bool),
     pub net: (f64, f64),
+    pub uptime: f64,
+    pub load: (f64, f64, f64),
     pub driver: String,
     pub cuda: String,
 }
@@ -335,6 +337,8 @@ impl Sampler {
             None => (vec![], vec![]),
         };
         let cpu_procs = read_cpu_procs(&self.prev_j, &cur_j, dt, 50);
+        let uptime = parse_uptime(&read_file("/proc/uptime"));
+        let load = parse_loadavg(&read_file("/proc/loadavg"));
         self.prev_stat = cur_stat;
         self.prev_net = cur_net;
         self.prev_vm = cur_vm;
@@ -348,6 +352,8 @@ impl Sampler {
             mem: (mu, mt),
             swap: (sw_used, sw_total, sw_io > 0.5),
             net,
+            uptime,
+            load,
             driver: self.driver.clone(),
             cuda: self.cuda.clone(),
         }

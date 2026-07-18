@@ -150,6 +150,34 @@ pub fn fmt_etime(sec: i64) -> String {
     }
 }
 
+/// /proc/uptime 首个数 = 开机至今秒数。
+pub fn parse_uptime(text: &str) -> f64 {
+    text.split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// /proc/loadavg 前三个数 = 1/5/15 分钟平均负载。
+pub fn parse_loadavg(text: &str) -> (f64, f64, f64) {
+    let mut it = text.split_whitespace();
+    let f = |x: Option<&str>| x.and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    (f(it.next()), f(it.next()), f(it.next()))
+}
+
+/// 开机时长人性化:>1天显示「天时」,否则「时分」/「分」。
+pub fn fmt_uptime(sec: i64) -> String {
+    let (d, rem) = (sec / 86400, sec % 86400);
+    let (h, m) = (rem / 3600, (rem % 3600) / 60);
+    if d > 0 {
+        format!("{}天{}时", d, h)
+    } else if h > 0 {
+        format!("{}时{}分", h, m)
+    } else {
+        format!("{}分", m)
+    }
+}
+
 pub fn fmt_rss(kb: i64) -> String {
     let mb = kb as f64 / 1024.0;
     if mb >= 1024.0 {
@@ -223,6 +251,17 @@ mod tests {
     fn t_vmstat() {
         assert_eq!(parse_vmstat("nr_x 1\npswpin 1000\npswpout 2000\n"), (1000, 2000));
         assert_eq!(parse_vmstat(""), (0, 0));
+    }
+
+    #[test]
+    fn t_uptime_load() {
+        assert!((parse_uptime("4340287.55 25879001.11\n") - 4340287.55).abs() < 0.1);
+        assert_eq!(parse_uptime(""), 0.0);
+        let (a, b, c) = parse_loadavg("13.48 18.18 26.75 9/6501 12345\n");
+        assert_eq!((a, b, c), (13.48, 18.18, 26.75));
+        assert_eq!(fmt_uptime(50 * 86400 + 4 * 3600 + 57 * 60), "50天4时");
+        assert_eq!(fmt_uptime(3 * 3600 + 20 * 60), "3时20分");
+        assert_eq!(fmt_uptime(45 * 60), "45分");
     }
 
     #[test]

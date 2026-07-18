@@ -45,6 +45,18 @@ fn temp_style(v: i64) -> Style {
         Style::default().fg(Color::Red)
     }
 }
+/// 负载按「负载/核数」上色 —— 于是红色在任何机器上都等于"超过本机核数、在排队",
+/// 不用心算除核数。绿<70%,黄 70~100%,红 ≥100%。
+fn load_style(load: f64, ncpu: usize) -> Style {
+    let r = load / ncpu.max(1) as f64;
+    if r < 0.7 {
+        Style::default().fg(Color::Green)
+    } else if r < 1.0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Red)
+    }
+}
 fn pi(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(-1.0)
 }
@@ -195,7 +207,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
             .split(area);
-        render_header(f, chunks[0], host, now, paused);
+        render_header(f, chunks[0], snap, host, now, paused);
         let n = h.saturating_sub(6).max(3);
         let mut procs: Vec<&CpuProc> = snap.cpu_procs.iter().collect();
         if rev {
@@ -253,7 +265,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     cons.push(Constraint::Length(1));
     let chunks = Layout::default().direction(Direction::Vertical).constraints(cons).split(area);
 
-    render_header(f, chunks[0], host, now, paused);
+    render_header(f, chunks[0], snap, host, now, paused);
     render_top(f, chunks[1], snap, side_by_side);
     render_gpu_procs(f, chunks[2], snap, me);
     if cpu_panel_h > 0 {
@@ -270,17 +282,36 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     );
 }
 
-fn render_header(f: &mut Frame, area: Rect, host: &str, now: &str, paused: bool) {
+fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &str, paused: bool) {
+    // 左:身份类信息(版本 / 主机 / 开机时长)
     let left = Line::from(vec![
-        Span::styled("wcn", hdr_style()),
+        Span::styled(concat!("wcn v", env!("CARGO_PKG_VERSION")), hdr_style()),
         Span::styled(format!(" @ {}", host), dim()),
+        Span::styled(
+            format!(" · 开机 {}", crate::parse::fmt_uptime(snap.uptime as i64)),
+            dim(),
+        ),
     ]);
     let tail = if paused {
         Span::styled("⏸ 已暂停", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
     } else {
         Span::styled("刷新 0.8s", dim())
     };
-    let right = Line::from(vec![Span::styled(format!("{}  ·  ", now), dim()), tail]).alignment(Alignment::Right);
+    // 右:动态信息(负载 1/5/15 分钟 / 时间 / 刷新)。窄了先裁掉最左的负载,时间/刷新恒可见。
+    // 负载三个数各按「值/核数」上色,红=超过本机核数(跨机器统一,不用心算)。
+    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let (l1, l5, l15) = snap.load;
+    let mut spans = vec![Span::styled("负载 ", dim())];
+    for (i, v) in [l1, l5, l15].iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", dim()));
+        }
+        spans.push(Span::styled(format!("{:.2}", v), load_style(*v, ncpu)));
+    }
+    spans.push(Span::styled("  ·  ", dim()));
+    spans.push(Span::styled(format!("{}  ·  ", now), dim()));
+    spans.push(tail);
+    let right = Line::from(spans).alignment(Alignment::Right);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -743,6 +774,8 @@ mod tests {
             mem: (98.0, 256.0),
             swap: (sw_total * 0.4, sw_total, sw_total > 0.0),
             net: (1.0, 2.0),
+            uptime: 50.0 * 86400.0 + 4.0 * 3600.0,
+            load: (13.48, 18.18, 26.75),
             driver: "570.211.01".into(),
             cuda: "12.8".into(),
         }
@@ -768,6 +801,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn t_load_style() {
+        let (g, y, r) = (
+            Style::default().fg(Color::Green),
+            Style::default().fg(Color::Yellow),
+            Style::default().fg(Color::Red),
+        );
+        // 阈值:<0.7×核 绿,0.7~1.0× 黄,≥1.0× 红(以 100 核为参照)
+        assert_eq!(load_style(0.0, 100), g);
+        assert_eq!(load_style(69.0, 100), g);
+        assert_eq!(load_style(70.0, 100), y);
+        assert_eq!(load_style(99.9, 100), y);
+        assert_eq!(load_style(100.0, 100), r);
+        assert_eq!(load_style(250.0, 100), r);
     }
 
     #[test]
