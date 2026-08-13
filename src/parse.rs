@@ -16,6 +16,8 @@ pub struct Gpu {
     pub mt: i64,
     pub pw: i64,
     pub plim: i64,
+    /// 高温告警(带迟滞:≥85°C 点亮,<82°C 才熄灭),避免温度骑在阈值上反复闪。
+    pub hot: bool,
 }
 
 /// 安全转 int:浮点字符串/[N/A] 等转不动则 0(对应 Python _i)。

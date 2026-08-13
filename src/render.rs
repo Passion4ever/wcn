@@ -18,6 +18,37 @@ pub enum Mode {
     Cpu,
 }
 
+/// 进程筛选。User 用于 [u](只看某人,精确匹配用户名);
+/// Text 用于 [/](子串匹配 用户名 或 命令,不分大小写)。
+#[derive(Clone, PartialEq)]
+pub enum Filter {
+    User(String),
+    Text(String),
+}
+
+impl Filter {
+    fn hit(&self, user: &str, cmd: &str) -> bool {
+        match self {
+            Filter::User(u) => user == u,
+            Filter::Text(q) => {
+                let q = q.to_lowercase();
+                user.to_lowercase().contains(&q) || cmd.to_lowercase().contains(&q)
+            }
+        }
+    }
+    /// 标题上的后缀,如 " · 仅 user01"
+    fn tag(&self) -> String {
+        match self {
+            Filter::User(u) => format!(" · 仅 {}", u),
+            Filter::Text(q) => format!(" · 匹配 \"{}\"", q),
+        }
+    }
+}
+
+fn keep(filter: Option<&Filter>, p: &CpuProc) -> bool {
+    filter.is_none_or(|f| f.hit(&p.user, &p.cmd))
+}
+
 fn dim() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
@@ -173,7 +204,9 @@ fn me_style(user: &str, me: &str) -> Option<Style> {
     }
 }
 
-pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, host: &str, now: &str, paused: bool) {
+#[allow(clippy::too_many_arguments)]
+pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, host: &str, now: &str, paused: bool,
+              filter: Option<&Filter>, typing: Option<&str>) {
     let area = f.area();
     let w = area.width as usize;
     let h = area.height as usize;
@@ -209,21 +242,20 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
             .split(area);
         render_header(f, chunks[0], snap, host, now, paused);
         let n = h.saturating_sub(6).max(3);
-        let mut procs: Vec<&CpuProc> = snap.cpu_procs.iter().collect();
+        // 筛选在完整进程集合上做(采样端已不再截断),否则会静默漏掉大量进程
+        let mut procs: Vec<&CpuProc> = snap.cpu_procs.iter().filter(|p| keep(filter, p)).collect();
         if rev {
             procs.reverse();
         }
         let shown = procs.len().min(n);
         let order = if rev { "升序" } else { "降序" };
-        let title = format!("CPU 进程 · 共 {},显示 {}({})", snap.cpu_procs.len(), shown, order);
+        let tag = filter.map(|f| f.tag()).unwrap_or_default();
+        let title = format!("CPU 进程{} · 共 {},显示 {}({})", tag, procs.len(), shown, order);
         let inner_w = chunks[1].width.saturating_sub(2) as usize;
         let lines = cpu_lines(&procs[..shown], me, true, inner_w);
-        f.render_widget(Paragraph::new(lines).block(panel(&title, Color::Blue)), chunks[1]);
-        let pk = if paused { "[p] 继续" } else { "[p] 暂停" };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!("  [c] 返回   [r] 反序   {}   [q] 退出", pk), dim()))),
-            chunks[2],
-        );
+        let bc = if filter.is_some() { Color::Yellow } else { Color::Blue };
+        f.render_widget(Paragraph::new(lines).block(panel(&title, bc)), chunks[1]);
+        f.render_widget(Paragraph::new(hint_line(paused, typing, true)), chunks[2]);
         return;
     }
 
@@ -247,9 +279,11 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     };
     let gpu_procs_h = 4 + snap.gpu_procs.len() + ncards.saturating_sub(1); // 边框2+表头1+横线1+行+卡间线
 
+    let cprocs: Vec<&CpuProc> = snap.cpu_procs.iter().filter(|p| keep(filter, p)).collect();
     let remaining = h.saturating_sub(2 + top_h);
     let cpu_chrome = 4; // 边框2 + 表头1 + 横线1
-    let want_cpu = snap.cpu_procs.len().min(10);
+    // .max(1):筛出 0 条时也保留面板(否则整块凭空消失,像是坏了)
+    let want_cpu = cprocs.len().min(10).max(1);
     let cpu_rows = remaining.saturating_sub(gpu_procs_h + cpu_chrome).min(want_cpu);
     let cpu_panel_h = if cpu_rows >= 1 { cpu_rows + cpu_chrome } else { 0 };
 
@@ -269,17 +303,35 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     render_top(f, chunks[1], snap, side_by_side);
     render_gpu_procs(f, chunks[2], snap, me);
     if cpu_panel_h > 0 {
-        let procs: Vec<&CpuProc> = snap.cpu_procs.iter().take(cpu_rows).collect();
+        let procs: Vec<&CpuProc> = cprocs.iter().take(cpu_rows).copied().collect();
         let inner_w = chunks[3].width.saturating_sub(2) as usize;
         let lines = cpu_lines(&procs, me, false, inner_w);
-        f.render_widget(Paragraph::new(lines).block(panel("CPU 进程 Top 10", Color::Blue)), chunks[3]);
+        let tag = filter.map(|f| f.tag()).unwrap_or_default();
+        let bc = if filter.is_some() { Color::Yellow } else { Color::Blue };
+        f.render_widget(Paragraph::new(lines).block(panel(&format!("CPU 进程 Top 10{}", tag), bc)), chunks[3]);
     }
     let hint = chunks.last().unwrap();
+    f.render_widget(Paragraph::new(hint_line(paused, typing, false)), *hint);
+}
+
+/// 底部提示行。输入搜索时整行让位给搜索框。
+fn hint_line<'a>(paused: bool, typing: Option<&str>, cpu_page: bool) -> Line<'a> {
+    if let Some(buf) = typing {
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled("搜索: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(buf.to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled("▏", Style::default().fg(Color::Yellow)),
+            Span::styled("   (用户名或命令   回车确认   Esc 取消)", dim()),
+        ]);
+    }
     let pk = if paused { "[p] 继续" } else { "[p] 暂停" };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(format!("  [c] 只看CPU进程   {}   [q] 退出", pk), dim()))),
-        *hint,
-    );
+    // 标签收紧到最小宽度 60 列也放得下(加了 u / 搜索两项后,原来的写法会被截掉"退出")
+    let head = if cpu_page { "  [c] 返回  [r] 反序" } else { "  [c] CPU页" };
+    Line::from(Span::styled(
+        format!("{}  [u] 仅我  [/] 搜索  {}  [q] 退出", head, pk),
+        dim(),
+    ))
 }
 
 fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &str, paused: bool) {
@@ -448,7 +500,10 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
         Alignment::Right,
     ];
     // 各 GPU 的文本(用于算列宽)
-    let gb_of = |g: &crate::parse::Gpu| format!("{}/{}G", g.mu / 1024, g.mt / 1024);
+    // 四舍五入而非截断:截断会把 1892MiB 说成 "1G"(实为 1.85G),
+    // 也会把 A6000 的 49140MiB 总量说成 "47G"(实为 48G)。
+    let gb = |m: i64| (m as f64 / 1024.0).round() as i64;
+    let gb_of = |g: &crate::parse::Gpu| format!("{}/{}G", gb(g.mu), gb(g.mt));
     let max_gb = snap.gpus.iter().map(|g| str_w(&gb_of(g))).max().unwrap_or(5);
     let vram_content = if show_membar { 11 + max_gb } else { max_gb }; // 块条10+空格1+GB
     // 列内容宽 = max(表头, 各行)
@@ -526,12 +581,8 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
 
     for g in &snap.gpus {
         let mratio = if g.mt > 0 { g.mu * 100 / g.mt } else { 0 };
-        let crit = g.temp >= 85;
-        let idx_style = if crit {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
+        // g.hot 已在采样端做过迟滞(≥85 亮,<82 灭),这里直接用,不会闪
+        let idx_style = Style::default().add_modifier(Modifier::BOLD);
         // 显存用量:块条 + GB
         let gb = gb_of(g);
         let mut vram: Vec<Span> = Vec::new();
@@ -549,7 +600,17 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
             cell_spans(1, vec![Span::styled(g.name.clone(), Style::default())], str_w(&g.name)),
             cell_spans(2, vram, vw),
             cell_spans(3, vec![Span::styled(format!("{}%", g.util), pct_style(g.util as f64))], str_w(&format!("{}%", g.util))),
-            cell_spans(4, vec![Span::styled(format!("{}°C", g.temp), temp_style(g.temp))], str_w(&format!("{}°C", g.temp))),
+            {
+                let t = format!("{}°C", g.temp);
+                let cw = str_w(&t);
+                // 高温只高亮温度这一格(整行反色太晃眼)
+                let st = if g.hot {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+                } else {
+                    temp_style(g.temp)
+                };
+                cell_spans(4, vec![Span::styled(t, st)], cw)
+            },
             {
                 let pw_pct = if g.plim > 0 { (g.pw * 100 / g.plim) as f64 } else { 0.0 };
                 let t = format!("{}/{}W", g.pw, g.plim);
@@ -557,13 +618,7 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
                 cell_spans(5, vec![Span::styled(t, pct_style(pw_pct))], cw)
             },
         ];
-        let mut spans = assemble(cells);
-        if crit {
-            for s in spans.iter_mut() {
-                s.style = s.style.add_modifier(Modifier::REVERSED);
-            }
-        }
-        lines.push(Line::from(spans));
+        lines.push(Line::from(assemble(cells)));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -577,7 +632,7 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
     let iw = inner.width as usize;
 
     // 列:idx(gutter) PID USER GPU% VRAM CPU% TIME COMMAND
-    let (w_pid, w_user, w_gpu, w_vram, w_cpu, w_time) = (7, 9, 5, 7, 5, 7);
+    let (w_pid, w_user, w_gpu, w_vram, w_cpu, w_time) = (7, 9, 5, 7, 6, 7); // w_cpu=6:满载可达 11200%
     // 行布局:1空 + idx(1) + 2空(gutter) + 各列(列间 1 空) + COMMAND
     // 表头/行的固定前缀宽度(到 COMMAND 前)
     let fixed = 1 + 1 + 2 + w_pid + 1 + w_user + 1 + w_gpu + 1 + w_vram + 1 + w_cpu + 1 + w_time + 1;
@@ -656,7 +711,7 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
 /// CPU 进程表(SIMPLE_HEAVY:表头对齐 + 全宽 ━ 横线 + 行,无竖线)。
 fn cpu_lines<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) -> Vec<Line<'a>> {
     // 列宽
-    let (w_pid, w_user, w_cpu, w_mem, w_res, w_swap, w_time) = (7, 10, 5, 5, 6, 6, 7);
+    let (w_pid, w_user, w_cpu, w_mem, w_res, w_swap, w_time) = (7, 10, 6, 5, 6, 6, 7); // w_cpu=6:满载可达 11200%
     let fixed = w_pid + w_user + w_cpu + w_mem + w_res + w_time + if with_swap { w_swap } else { 0 };
     let ncols = if with_swap { 8 } else { 7 };
     let cmd_w = inner_w.saturating_sub(1 + fixed + (ncols - 1));
@@ -740,6 +795,7 @@ mod tests {
                 mt: 81920,
                 pw: 200,
                 plim: 300,
+                hot: i == 2,
             })
             .collect();
         let gpu_procs = (0..ngproc)
@@ -781,11 +837,13 @@ mod tests {
         }
     }
 
-    fn draw(snap: &Snapshot, w: u16, h: u16, mode: Mode, rev: bool) {
+    fn draw(snap: &Snapshot, w: u16, h: u16, mode: Mode, rev: bool) { draw_f(snap, w, h, mode, rev, None, None) }
+
+    fn draw_f(snap: &Snapshot, w: u16, h: u16, mode: Mode, rev: bool, filter: Option<&Filter>, typing: Option<&str>) {
         let backend = TestBackend::new(w, h);
         let mut term = Terminal::new(backend).unwrap();
         let paused = rev; // 顺带覆盖 paused 两种取值
-        term.draw(|f| render(f, snap, mode, rev, "u", "host", "2026-06-30 00:00:00", paused))
+        term.draw(|f| render(f, snap, mode, rev, "u", "host", "2026-06-30 00:00:00", paused, filter, typing))
             .unwrap();
     }
 
@@ -804,6 +862,18 @@ mod tests {
     }
 
     #[test]
+    fn t_filter_hit() {
+        let u = Filter::User("user01".into());
+        assert!(u.hit("user01", "python train.py"));
+        assert!(!u.hit("user010", "x"));          // 精确匹配,不是前缀
+        assert!(!u.hit("user02", "/home/user01/a.py")); // 别人跑我路径下的脚本,不算我的
+        let t = Filter::Text("PyThOn".into());
+        assert!(t.hit("bob", "/usr/bin/python3 a.py")); // 命令命中,不分大小写
+        assert!(t.hit("pythonuser", "sleep"));          // 用户名命中
+        assert!(!t.hit("bob", "sleep 1"));
+    }
+
+    #[test]
     fn t_load_style() {
         let (g, y, r) = (
             Style::default().fg(Color::Green),
@@ -817,6 +887,26 @@ mod tests {
         assert_eq!(load_style(99.9, 100), y);
         assert_eq!(load_style(100.0, 100), r);
         assert_eq!(load_style(250.0, 100), r);
+    }
+
+    #[test]
+    fn smoke_filter_and_typing() {
+        let snap = mk_snap(4, 6, 30, 61.0);
+        let filters = [
+            None,
+            Some(Filter::User("u".into())),      // 命中全部(mk_snap 里 user 都是 "u")
+            Some(Filter::User("nobody".into())), // 命中 0 条:面板不能消失
+            Some(Filter::Text("python".into())),
+        ];
+        for fl in &filters {
+            for typ in [None, Some(""), Some("py")] {
+                for &(w, h) in &[(60u16, 20u16), (120, 30), (200, 45)] {
+                    for mode in [Mode::Full, Mode::Cpu] {
+                        draw_f(&snap, w, h, mode, false, fl.as_ref(), typ);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -160,6 +160,7 @@ pub fn read_gpus(nvml: &Nvml) -> Vec<Gpu> {
             mt,
             pw,
             plim,
+            hot: false, // 由 Sampler 带迟滞地填,单帧无从判断
         });
     }
     out
@@ -242,11 +243,12 @@ pub fn read_gpu_procs(
     procs
 }
 
+/// 全量返回(不截断):按用户筛选必须在完整集合上做,
+/// 否则筛的是"全局前 N 名里恰好属于该用户的那几条",会静默漏掉大部分。
 pub fn read_cpu_procs(
     prev: &HashMap<String, i64>,
     cur: &HashMap<String, i64>,
     dt: f64,
-    n: usize,
 ) -> Vec<CpuProc> {
     let out = run(&["ps", "-eo", "pid=,user:20=,pmem=,rss=,etimes=,args="]);
     let mut procs: Vec<(f64, CpuProc)> = Vec::new();
@@ -271,12 +273,11 @@ pub fn read_cpu_procs(
         ));
     }
     procs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    procs.truncate(n);
     procs
         .into_iter()
         .map(|(pc, mut p)| {
             p.pcpu = format!("{:.0}", pc);
-            p.swap = read_proc_swap(&p.pid); // 仅给入选前 n 个读 VmSwap(便宜)
+            p.swap = read_proc_swap(&p.pid);
             p
         })
         .collect()
@@ -293,6 +294,8 @@ pub struct Sampler {
     nvml: Option<Nvml>,
     driver: String,
     cuda: String,
+    /// 各卡上一帧的高温状态,用于迟滞判定(卡号 → 是否已告警)。
+    hot: HashMap<String, bool>,
 }
 
 impl Sampler {
@@ -311,6 +314,7 @@ impl Sampler {
             nvml,
             driver,
             cuda,
+            hot: HashMap::new(),
         }
     }
 
@@ -332,11 +336,18 @@ impl Sampler {
         } else {
             0.0
         };
-        let (gpus, gpu_procs) = match &self.nvml {
+        let (mut gpus, gpu_procs) = match &self.nvml {
             Some(n) => (read_gpus(n), read_gpu_procs(n, &self.prev_j, &cur_j, dt)),
             None => (vec![], vec![]),
         };
-        let cpu_procs = read_cpu_procs(&self.prev_j, &cur_j, dt, 50);
+        // 高温告警的迟滞判定:≥85 点亮,要掉到 <82 才熄灭。
+        // 温度骑在单一阈值上会每帧来回穿越,告警就会一闪一闪。
+        for g in &mut gpus {
+            let was = self.hot.get(&g.idx).copied().unwrap_or(false);
+            g.hot = if was { g.temp >= 82 } else { g.temp >= 85 };
+            self.hot.insert(g.idx.clone(), g.hot);
+        }
+        let cpu_procs = read_cpu_procs(&self.prev_j, &cur_j, dt);
         let uptime = parse_uptime(&read_file("/proc/uptime"));
         let load = parse_loadavg(&read_file("/proc/loadavg"));
         self.prev_stat = cur_stat;

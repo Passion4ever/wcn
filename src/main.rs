@@ -7,11 +7,14 @@ use ratatui::crossterm::{
     cursor::{Hide, Show},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use render::Mode;
+use render::{Filter, Mode};
 use std::cell::RefCell;
 use std::io::{self, Write};
 use std::panic::AssertUnwindSafe;
@@ -80,7 +83,10 @@ struct TermGuard;
 impl TermGuard {
     fn new() -> io::Result<Self> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        // 必须清屏:ratatui 只重绘与上一帧不同的格子,而首帧的"上一帧"是空的,
+        // 于是它画的空格根本不会写出去,屏幕上原有的字就从空隙里透出来。
+        // 备用屏通常自带清屏,但 tmux/终端禁用备用屏时不会 —— 那时残留就露出来了。
+        execute!(io::stdout(), EnterAlternateScreen, Clear(ClearType::All), Hide)?;
         set_stdout_nonblocking(true);
         Ok(TermGuard)
     }
@@ -123,7 +129,9 @@ fn handle_args() -> bool {
              wcn --version   显示版本\n  \
              wcn --help      显示本帮助\n\n\
              界面按键:\n  \
-             c  只看 CPU 进程   r  反序   p  定格   q  退出",
+             c  只看 CPU 进程   r  反序   p  定格   q  退出\n  \
+             u  只看自己的进程(再按一次取消)\n  \
+             /  搜索(用户名或命令,回车确认 / Esc 取消)",
             env!("CARGO_PKG_VERSION")
         );
         return true;
@@ -179,19 +187,26 @@ fn main() -> io::Result<()> {
     let mut paused = false;
     // 当前显示的快照(暂停时冻结:不再拉新数据,连时钟一起定格)
     let mut cur: Option<(Snapshot, u64, String)> = None;
-    let mut last: Option<(u64, u16, u16, bool, bool, bool)> = None;
+    let mut filter: Option<Filter> = None;      // [u] 只看自己 / [/] 搜索
+    let mut typing: Option<String> = None;      // Some=正在输入搜索词
+    // 重绘去重键:filter/typing 必须在内,否则按键后要等下一帧才重画,暂停时永不重画
+    let mut last: Option<(u64, u16, u16, bool, bool, bool, Option<Filter>, Option<String>)> = None;
 
     loop {
         // 未暂停时拉取最新快照(连同采集时刻的时钟一起存);暂停时保持冻结
         if !paused {
-            let (snap_opt, ver) = {
+            // 锁内先比版本号,不同才克隆:主循环 ~10 次/秒,而快照 0.8s 才换一次,
+            // 无条件克隆等于 87% 白做,还会持锁挡住采样线程。
+            let newer = {
                 let g = shared.lock().unwrap();
-                (g.0.clone(), g.1)
-            };
-            if let Some(snap) = snap_opt {
-                if cur.as_ref().map(|c| c.1) != Some(ver) {
-                    cur = Some((snap, ver, now_str()));
+                if cur.as_ref().map(|c| c.1) != Some(g.1) {
+                    g.0.clone().map(|s| (s, g.1))
+                } else {
+                    None
                 }
+            };
+            if let Some((snap, ver)) = newer {
+                cur = Some((snap, ver, now_str()));
             }
         }
 
@@ -201,10 +216,14 @@ fn main() -> io::Result<()> {
         if pending.is_empty() {
             if let Some((snap, ver, now)) = &cur {
                 let size = terminal.size()?;
-                let key = (*ver, size.width, size.height, matches!(mode, Mode::Cpu), rev, paused);
-                if last != Some(key) {
+                let key = (*ver, size.width, size.height, matches!(mode, Mode::Cpu), rev, paused,
+                           filter.clone(), typing.clone());
+                if last != Some(key.clone()) {
                     last = Some(key);
-                    terminal.draw(|f| render::render(f, snap, mode, rev, &me, &host, now, paused))?;
+                    terminal.draw(|f| {
+                        render::render(f, snap, mode, rev, &me, &host, now, paused,
+                                       filter.as_ref(), typing.as_deref())
+                    })?;
                     pending.append(&mut sink.0.borrow_mut()); // 取出这帧字节
                     flush_pending(&mut pending)?;
                 }
@@ -215,6 +234,23 @@ fn main() -> io::Result<()> {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press || k.kind == KeyEventKind::Repeat => {
                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                    if typing.is_some() {
+                        // 输入态:所有字符键都当文本(否则搜 "qwen" 会直接退出),只留 Ctrl-C
+                        match k.code {
+                            KeyCode::Char('c') if ctrl => break,
+                            KeyCode::Esc => typing = None,
+                            KeyCode::Enter => {
+                                let q = typing.take().unwrap_or_default().trim().to_string();
+                                filter = if q.is_empty() { None } else { Some(Filter::Text(q)) };
+                            }
+                            KeyCode::Backspace => {
+                                typing.as_mut().unwrap().pop();
+                            }
+                            KeyCode::Char(ch) => typing.as_mut().unwrap().push(ch),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match k.code {
                         KeyCode::Char('q') => break,
                         KeyCode::Char('c') if ctrl => break, // raw 模式 Ctrl-C
@@ -226,6 +262,15 @@ fn main() -> io::Result<()> {
                         }
                         KeyCode::Char('r') => rev = !rev,
                         KeyCode::Char('p') => paused = !paused, // 定格 / 继续
+                        // 只看自己 ⇄ 全部(从任何筛选状态按一下都是"只看自己")
+                        KeyCode::Char('u') => {
+                            filter = match &filter {
+                                Some(Filter::User(u)) if *u == me => None,
+                                _ => Some(Filter::User(me.clone())),
+                            }
+                        }
+                        KeyCode::Char('/') => typing = Some(String::new()),
+                        KeyCode::Esc => filter = None,
                         _ => {}
                     }
                 }
