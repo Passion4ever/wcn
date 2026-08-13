@@ -503,7 +503,10 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
     // 四舍五入而非截断:截断会把 1892MiB 说成 "1G"(实为 1.85G),
     // 也会把 A6000 的 49140MiB 总量说成 "47G"(实为 48G)。
     let gb = |m: i64| (m as f64 / 1024.0).round() as i64;
-    let gb_of = |g: &crate::parse::Gpu| format!("{}/{}G", gb(g.mu), gb(g.mt));
+    // 已用固定右对齐 3 位,数字才会上下对齐(现无 4 位数显存的卡);
+    // 总量按各卡最大宽度补齐 —— 总量是静态的,不会像已用那样变动导致列宽抖动。
+    let tw = snap.gpus.iter().map(|g| gb(g.mt).to_string().len()).max().unwrap_or(2);
+    let gb_of = |g: &crate::parse::Gpu| format!("{:>3}/{:>tw$}G", gb(g.mu), gb(g.mt), tw = tw);
     let max_gb = snap.gpus.iter().map(|g| str_w(&gb_of(g))).max().unwrap_or(5);
     let vram_content = if show_membar { 11 + max_gb } else { max_gb }; // 块条10+空格1+GB
     // 列内容宽 = max(表头, 各行)
