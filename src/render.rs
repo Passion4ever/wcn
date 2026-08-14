@@ -277,11 +277,18 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         }
         s.len()
     };
-    let gpu_procs_h = 4 + snap.gpu_procs.len() + ncards.saturating_sub(1); // 边框2+表头1+横线1+行+卡间线
-
     let cprocs: Vec<&CpuProc> = snap.cpu_procs.iter().filter(|p| keep(filter, p)).collect();
     let remaining = h.saturating_sub(2 + top_h);
     let cpu_chrome = 4; // 边框2 + 表头1 + 横线1
+
+    // GPU 进程表必须按剩余高度收缩。不 clamp 的话总高会超出屏幕,布局求解器转而去挤
+    // 上面那块,表现为 GPU 概览"整张卡凭空消失"而边框照常闭合 —— 肉眼看不出少了卡,
+    // 而"哪张卡是空的"正是这工具要回答的问题。宁可少列几个进程,概览必须完整。
+    let gp_need = snap.gpu_procs.len() + ncards.saturating_sub(1); // 进程行 + 卡间分隔线
+    let gp_content = gp_need.min(remaining.saturating_sub(4));     // 4 = 边框2+表头1+横线1
+    // 有 chrome 的空间就画面板(内容行可为 0):没进程时是空面板,挤不下时靠标题说明,
+    // 都比留一块无解释的空白强
+    let gpu_procs_h = if remaining >= 4 { 4 + gp_content } else { 0 };
     // .max(1):筛出 0 条时也保留面板(否则整块凭空消失,像是坏了)
     let want_cpu = cprocs.len().min(10).max(1);
     let cpu_rows = remaining.saturating_sub(gpu_procs_h + cpu_chrome).min(want_cpu);
@@ -290,7 +297,7 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     let mut cons = vec![
         Constraint::Length(1),
         Constraint::Length(top_h as u16),
-        Constraint::Length(gpu_procs_h as u16),
+        Constraint::Length(gpu_procs_h as u16), // 可能为 0(挤不下时整块不画)
     ];
     if cpu_panel_h > 0 {
         cons.push(Constraint::Length(cpu_panel_h as u16));
@@ -301,7 +308,9 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
 
     render_header(f, chunks[0], snap, host, now, paused);
     render_top(f, chunks[1], snap, side_by_side);
-    render_gpu_procs(f, chunks[2], snap, me);
+    if gpu_procs_h > 0 {
+        render_gpu_procs(f, chunks[2], snap, me, gp_content);
+    }
     if cpu_panel_h > 0 {
         let procs: Vec<&CpuProc> = cprocs.iter().take(cpu_rows).copied().collect();
         let inner_w = chunks[3].width.saturating_sub(2) as usize;
@@ -486,7 +495,7 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(block, area);
     let iw = inner.width as usize;
     if snap.gpus.is_empty() {
-        f.render_widget(Paragraph::new(" 无 NVIDIA GPU / nvidia-smi 不可用"), inner);
+        f.render_widget(Paragraph::new(" 无 NVIDIA GPU / 驱动库(NVML)不可用"), inner);
         return;
     }
     let show_membar = iw >= 80;
@@ -626,10 +635,22 @@ fn render_gpu_overview(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
+fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str, budget: usize) {
     // 无竖线(SIMPLE_HEAVY 风格);第一列=序号(无列名,1 字宽的左 gutter);
     // 表头下粗 ━ 横线;卡间用细 ─ 分隔;COMMAND 末列按宽省略。
-    let block = panel("GPU 进程", Color::Yellow);
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in &snap.gpu_procs {
+        *counts.entry(p.gpu.clone()).or_insert(0) += 1;
+    }
+    // budget = 可用的内容行数(进程行 + 卡间分隔线)。放不下就少列几行,但必须在标题
+    // 说清楚 —— 默默少显示正是这次要修的那类 bug。
+    let need = snap.gpu_procs.len() + counts.len().saturating_sub(1);
+    let title = if budget >= need {
+        "GPU 进程".to_string()
+    } else {
+        format!("GPU 进程 · 共 {},窗口太小只显示部分", snap.gpu_procs.len())
+    };
+    let block = panel(&title, Color::Yellow);
     let inner = block.inner(area);
     f.render_widget(block, area);
     let iw = inner.width as usize;
@@ -640,11 +661,6 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
     // 表头/行的固定前缀宽度(到 COMMAND 前)
     let fixed = 1 + 1 + 2 + w_pid + 1 + w_user + 1 + w_gpu + 1 + w_vram + 1 + w_cpu + 1 + w_time + 1;
     let cmd_avail = iw.saturating_sub(fixed);
-
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for p in &snap.gpu_procs {
-        *counts.entry(p.gpu.clone()).or_insert(0) += 1;
-    }
 
     let mut lines: Vec<Line> = Vec::new();
     // 表头(序号列空白)
@@ -670,12 +686,17 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
 
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut prev: Option<String> = None;
+    let mut used = 0usize; // 已用的内容行数(含卡间线),不能超 budget
     for p in &snap.gpu_procs {
-        if let Some(pv) = &prev {
-            if pv != &p.gpu {
-                lines.push(Line::from(Span::styled("─".repeat(iw), dim()))); // 卡间细横线
-            }
+        let sep = prev.as_ref().is_some_and(|pv| pv != &p.gpu);
+        if used + 1 + usize::from(sep) > budget {
+            break;
         }
+        if sep {
+            lines.push(Line::from(Span::styled("─".repeat(iw), dim()))); // 卡间细横线
+            used += 1;
+        }
+        used += 1;
         prev = Some(p.gpu.clone());
         let c = seen.entry(p.gpu.clone()).or_insert(0);
         *c += 1;
