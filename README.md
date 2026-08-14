@@ -36,9 +36,16 @@
 > 筛选只作用于 **CPU 进程**表(筛选中面板边框变黄);GPU 进程表始终显示全部——
 > 共享机上「别人占了多少显存」恰恰最该看见。
 
-## 安装 / 更新
+## 安装 / 更新 / 卸载
 
-一行搞定。**装和更新是同一条命令**,想更新就再跑一遍:
+装好之后,后续直接用自带子命令:
+
+```bash
+wcn update      # 更新到最新版(就地替换,原位置不变)
+wcn uninstall   # 卸载(会先确认)
+```
+
+**首次安装**一行搞定(这条也可随时重跑当更新用):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Passion4ever/wcn/main/install.sh | bash

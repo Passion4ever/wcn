@@ -84,22 +84,27 @@ check_alias() {
   esac
 }
 
-CUR=""
-if command -v wcn >/dev/null 2>&1; then
-  CUR="$(ver_of "$(command -v wcn)")"   # 旧版取不到就是空,当作未知,继续装
+# 要比对的是"将被替换的那个 wcn":`wcn update` 传了 WCN_DIR 就以它为准,
+# 否则才回退到 PATH 查找 —— 否则 PATH 里若有另一个更新的 wcn,会误判"已最新"而漏更目标。
+if [ -n "${WCN_DIR:-}" ]; then
+  TARGET="$WCN_DIR/wcn"                              # 指定了目录,目标就是它,不看 PATH
+else
+  TARGET="$(command -v wcn 2>/dev/null || true)"
 fi
+CUR=""
+[ -x "$TARGET" ] && CUR="$(ver_of "$TARGET")"        # 取不到版本就当未知,继续装
 LATEST="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
   | sed -nE 's/.*"tag_name": *"v?([^"]+)".*/\1/p' | awk 'NR==1{print}' || true)"
 
 if [ -n "$CUR" ] && [ -n "$LATEST" ] && [ "$CUR" = "$LATEST" ]; then
-  echo "✓ 已是最新版 $CUR($(command -v wcn)),无需更新。"
+  echo "✓ 已是最新版 $CUR($TARGET),无需更新。"
   check_alias      # 已最新也要查:装了却敲不出来,正是最让人懵的情况
   exit 0
 fi
 
 if [ -n "$CUR" ]; then
   echo "发现新版本:当前 $CUR  →  最新 ${LATEST:-未知}"
-elif command -v wcn >/dev/null 2>&1; then
+elif [ -n "$TARGET" ]; then
   echo "已装 wcn(版本未知,旧版无 --version)  →  将更新到 ${LATEST:-最新}"
 else
   echo "将安装 wcn ${LATEST:+v$LATEST}"
@@ -107,6 +112,10 @@ fi
 
 # --- 3. 装哪儿:让用户选;没 tty(非交互)则默认本地,不卡住 -----------------
 choose_dir() {
+  # WCN_DIR:由 `wcn update` 传入,表示"就地更新到现有安装位置",不必再问
+  if [ -n "${WCN_DIR:-}" ]; then
+    echo "$WCN_DIR"; return
+  fi
   # curl|bash 时 stdin 是脚本,要提问必须走 /dev/tty。
   # 两个坑:① 不能用 [ -r /dev/tty ] —— 它只看权限位(对所有人可读),没有控制终端时
   # 照样返回真,真正 open() 才失败,必须实际试开一次;② 2>/dev/null 必须写在

@@ -114,9 +114,68 @@ fn now_str() -> String {
         .unwrap_or_default()
 }
 
-/// --version / --help:打印后直接退出,不进 TUI。
+const INSTALL_URL: &str = "https://raw.githubusercontent.com/Passion4ever/wcn/main/install.sh";
+
+/// `wcn update`:交给 install.sh —— 安装/更新的唯一权威(版本比对、原子替换、
+/// alias 冲突检测都在那儿),这里只告诉它"就地更新到我现在所在的目录"。
+fn do_update() -> bool {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let mut cmd = Command::new("bash");
+    // 必须 pipefail:curl 失败时 bash 收到空输入、什么都不做却退出 0,
+    // 更新就会"静默假装成功"。有了 pipefail,curl 的错误码才会透出来。
+    cmd.arg("-c")
+        .arg(format!("set -o pipefail; curl -fsSL {} | bash", INSTALL_URL));
+    if let Some(d) = &dir {
+        cmd.env("WCN_DIR", d); // 跳过"装到哪里"的询问,原地升级
+    }
+    match cmd.status() {
+        Ok(st) if st.success() => {}
+        Ok(_) => {
+            eprintln!("更新失败:需要能访问 GitHub(走代理时设 HTTPS_PROXY)");
+            std::process::exit(1); // 失败要能被脚本察觉
+        }
+        Err(e) => {
+            eprintln!("无法执行 bash/curl:{e}");
+            std::process::exit(1);
+        }
+    }
+    true
+}
+
+/// `wcn uninstall`:删掉当前正在跑的这个二进制(Linux 上删除运行中的文件是安全的)。
+fn do_uninstall() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("找不到自身路径,请手动删除");
+        return true;
+    };
+    print!("删除 {} ? [y/N]: ", exe.display());
+    let _ = io::stdout().flush();
+    let mut ans = String::new();
+    let _ = io::stdin().read_line(&mut ans);
+    if !matches!(ans.trim(), "y" | "Y" | "yes" | "YES") {
+        println!("已取消");
+        return true;
+    }
+    match std::fs::remove_file(&exe) {
+        Ok(()) => println!("已删除 {}", exe.display()),
+        Err(e) => {
+            eprintln!("删除失败:{e}(装在系统目录时需要 sudo)");
+            std::process::exit(1);
+        }
+    }
+    true
+}
+
+/// 子命令 / --version / --help:处理完直接退出,不进 TUI。
 fn handle_args() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(|s| s.as_str()) {
+        Some("update") => return do_update(),
+        Some("uninstall") => return do_uninstall(),
+        _ => {}
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("wcn {}", env!("CARGO_PKG_VERSION"));
         return true;
@@ -126,6 +185,8 @@ fn handle_args() -> bool {
             "wcn {} — 终端 GPU + 系统监控\n\n\
              用法:\n  \
              wcn             启动监控界面\n  \
+             wcn update      更新到最新版(就地替换)\n  \
+             wcn uninstall   卸载(删除本程序)\n  \
              wcn --version   显示版本\n  \
              wcn --help      显示本帮助\n\n\
              界面按键:\n  \
