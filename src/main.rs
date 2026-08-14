@@ -169,35 +169,41 @@ fn do_uninstall() -> bool {
 }
 
 /// 子命令 / --version / --help:处理完直接退出,不进 TUI。
+/// 严格匹配第一个参数 —— 打错(如 `wcn updte`)必须报错,
+/// 否则会静默进入监控界面,看上去像"命令生效了"。
 fn handle_args() -> bool {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
-        Some("update") => return do_update(),
-        Some("uninstall") => return do_uninstall(),
-        _ => {}
+        None => false, // 无参数:进监控界面
+        Some("update") => do_update(),
+        Some("uninstall") => do_uninstall(),
+        Some("--version" | "-V") => {
+            println!("wcn {}", env!("CARGO_PKG_VERSION"));
+            true
+        }
+        Some("--help" | "-h") => {
+            println!(
+                "wcn {} — 终端 GPU + 系统监控\n\n\
+                 用法:\n  \
+                 wcn             启动监控界面\n  \
+                 wcn update      更新到最新版(就地替换)\n  \
+                 wcn uninstall   卸载(删除本程序)\n  \
+                 wcn --version   显示版本\n  \
+                 wcn --help      显示本帮助\n\n\
+                 界面按键:\n  \
+                 c  只看 CPU 进程   r  反序   p  定格   q  退出\n  \
+                 u  只看自己的进程(再按一次取消)\n  \
+                 /  搜索(用户名或命令,回车确认 / Esc 取消)",
+                env!("CARGO_PKG_VERSION")
+            );
+            true
+        }
+        Some(other) => {
+            eprintln!("wcn: 未知参数 `{other}`");
+            eprintln!("用 `wcn --help` 查看用法");
+            std::process::exit(2);
+        }
     }
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("wcn {}", env!("CARGO_PKG_VERSION"));
-        return true;
-    }
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(
-            "wcn {} — 终端 GPU + 系统监控\n\n\
-             用法:\n  \
-             wcn             启动监控界面\n  \
-             wcn update      更新到最新版(就地替换)\n  \
-             wcn uninstall   卸载(删除本程序)\n  \
-             wcn --version   显示版本\n  \
-             wcn --help      显示本帮助\n\n\
-             界面按键:\n  \
-             c  只看 CPU 进程   r  反序   p  定格   q  退出\n  \
-             u  只看自己的进程(再按一次取消)\n  \
-             /  搜索(用户名或命令,回车确认 / Esc 取消)",
-            env!("CARGO_PKG_VERSION")
-        );
-        return true;
-    }
-    false
 }
 
 fn main() -> io::Result<()> {
