@@ -43,6 +43,10 @@ pub struct Snapshot {
     pub net: (f64, f64),
     pub uptime: f64,
     pub load: (f64, f64, f64),
+    /// 逻辑核数,用作负载着色的分母。数 /proc/stat 的 cpuN 行 ——
+    /// available_parallelism() 会跟着 taskset/cgroup 的亲和性缩小(实测 taskset -c 0-7 → 8),
+    /// 而 /proc/loadavg 始终是全机口径,两者一除会把负载判成一路超载。
+    pub ncpu: usize,
     pub driver: String,
     pub cuda: String,
 }
@@ -173,6 +177,7 @@ pub fn read_gpu_procs(
     prev: &HashMap<String, i64>,
     cur: &HashMap<String, i64>,
     dt: f64,
+    cpu_procs: &[CpuProc],
 ) -> Vec<GpuProc> {
     let n = nvml.device_count().unwrap_or(0);
     // (gpu_idx, pid, fb_MB, sm)
@@ -208,23 +213,22 @@ pub fn read_gpu_procs(
     if raw.is_empty() {
         return vec![];
     }
-    let pids: Vec<String> = raw.iter().map(|(_, pid, _, _)| pid.to_string()).collect();
-    let out = run(&["ps", "-o", "pid=,user=,etimes=,args=", "-p", &pids.join(",")]);
-    let mut info: HashMap<String, (String, String, String)> = HashMap::new();
-    for line in out.lines() {
-        let f = splitn_ws(line, 4);
-        if f.len() >= 4 {
-            info.insert(f[0].clone(), (f[1].clone(), f[2].clone(), f[3].clone()));
-        }
-    }
+    // 复用全机那次 ps 的结果:read_cpu_procs 已经把每个 pid 的 user/etime/cmd 都取回来了,
+    // 再单独跑一次 `ps -p <pids>` 纯属重复(实测 ~30ms/帧)。
+    // 而且那条命令用的是 `user=`(截断到 8 字符,messagebus → "message+"),
+    // 这里改用全机那次的 `user:20=`,长用户名的截断问题一并消失。
+    let info: HashMap<&str, (&str, &str, &str)> = cpu_procs
+        .iter()
+        .map(|p| (p.pid.as_str(), (p.user.as_str(), p.etime.as_str(), p.cmd.as_str())))
+        .collect();
     let mut procs: Vec<GpuProc> = raw
         .iter()
         .map(|(gpu, pid, fb, sm)| {
             let pid = pid.to_string();
-            let (user, et, cmd) = info
-                .get(&pid)
-                .cloned()
-                .unwrap_or_else(|| ("?".into(), "0".into(), "-".into()));
+            let (user, etime, cmd) = info
+                .get(pid.as_str())
+                .map(|(u, e, c)| (u.to_string(), e.to_string(), c.to_string()))
+                .unwrap_or_else(|| ("?".into(), "-".into(), "-".into()));
             let pcpu = proc_cpu_pct(prev.get(&pid).copied(), cur.get(&pid).copied(), dt);
             GpuProc {
                 gpu: gpu.clone(),
@@ -233,7 +237,7 @@ pub fn read_gpu_procs(
                 sm: sm.clone(),
                 fb: fb.to_string(),
                 pcpu: format!("{:.0}", pcpu),
-                etime: fmt_etime(pi(&et)),
+                etime,
                 cmd,
             }
         })
@@ -277,7 +281,9 @@ pub fn read_cpu_procs(
         .into_iter()
         .map(|(pc, mut p)| {
             p.pcpu = format!("{:.0}", pc);
-            p.swap = read_proc_swap(&p.pid);
+            // 内核线程(ps 里显示为 [kthreadd] 这种)status 里没有 VmSwap 行,
+            // 本机 1337 个进程里有 1057 个是内核线程,跳过它们省下大部分 IO
+            p.swap = if p.cmd.starts_with('[') { 0 } else { read_proc_swap(&p.pid) };
             p
         })
         .collect()
@@ -294,6 +300,7 @@ pub struct Sampler {
     nvml: Option<Nvml>,
     driver: String,
     cuda: String,
+    ncpu: usize,
     /// 各卡上一帧的高温状态,用于迟滞判定(卡号 → 是否已告警)。
     hot: HashMap<String, bool>,
 }
@@ -314,6 +321,11 @@ impl Sampler {
             nvml,
             driver,
             cuda,
+            ncpu: read_file("/proc/stat")
+                .lines()
+                .filter(|l| l.starts_with("cpu") && l.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
+                .count()
+                .max(1),
             hot: HashMap::new(),
         }
     }
@@ -336,8 +348,12 @@ impl Sampler {
         } else {
             0.0
         };
+        let cpu_procs = read_cpu_procs(&self.prev_j, &cur_j, dt);
         let (mut gpus, gpu_procs) = match &self.nvml {
-            Some(n) => (read_gpus(n), read_gpu_procs(n, &self.prev_j, &cur_j, dt)),
+            Some(n) => (
+                read_gpus(n),
+                read_gpu_procs(n, &self.prev_j, &cur_j, dt, &cpu_procs),
+            ),
             None => (vec![], vec![]),
         };
         // 高温告警的迟滞判定:≥85 点亮,要掉到 <82 才熄灭。
@@ -347,7 +363,6 @@ impl Sampler {
             g.hot = if was { g.temp >= 82 } else { g.temp >= 85 };
             self.hot.insert(g.idx.clone(), g.hot);
         }
-        let cpu_procs = read_cpu_procs(&self.prev_j, &cur_j, dt);
         let uptime = parse_uptime(&read_file("/proc/uptime"));
         let load = parse_loadavg(&read_file("/proc/loadavg"));
         self.prev_stat = cur_stat;
@@ -365,6 +380,7 @@ impl Sampler {
             net,
             uptime,
             load,
+            ncpu: self.ncpu,
             driver: self.driver.clone(),
             cuda: self.cuda.clone(),
         }

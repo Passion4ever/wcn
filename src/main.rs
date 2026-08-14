@@ -281,6 +281,24 @@ fn main() -> io::Result<()> {
         flush_pending(&mut pending)?;
 
         if pending.is_empty() {
+            // 首帧之前(Nvml::init + 预热 + 首次采样,约 0.5s)什么都没有,只有一块黑屏;
+            // 驱动异常时首次 NVML 查询可能更久,那时用户分不清是卡了还是坏了。
+            if cur.is_none() && last.is_none() {
+                last = Some(Default::default());
+                terminal.draw(|f| {
+                    let a = f.area();
+                    f.render_widget(
+                        ratatui::widgets::Paragraph::new(format!(
+                            "wcn v{} — 正在采样…",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .alignment(ratatui::layout::Alignment::Center),
+                        ratatui::layout::Rect { y: a.height / 2, height: 1.min(a.height), ..a },
+                    );
+                })?;
+                pending.append(&mut sink.0.borrow_mut());
+                flush_pending(&mut pending)?;
+            }
             if let Some((snap, ver, now)) = &cur {
                 let size = terminal.size()?;
                 let key = (*ver, size.width, size.height, matches!(mode, Mode::Cpu), rev, paused,

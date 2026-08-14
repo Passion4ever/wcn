@@ -317,7 +317,9 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         let lines = cpu_lines(&procs, me, false, inner_w);
         let tag = filter.map(|f| f.tag()).unwrap_or_default();
         let bc = if filter.is_some() { Color::Yellow } else { Color::Blue };
-        f.render_widget(Paragraph::new(lines).block(panel(&format!("CPU 进程 Top 10{}", tag), bc)), chunks[3]);
+        // 不写死 "Top 10":实际行数由剩余高度决定,可能只有 1 行;筛选后更要给总数
+        let title = format!("CPU 进程{} · 共 {},显示 {}", tag, cprocs.len(), cpu_rows);
+        f.render_widget(Paragraph::new(lines).block(panel(&title, bc)), chunks[3]);
     }
     let hint = chunks.last().unwrap();
     f.render_widget(Paragraph::new(hint_line(paused, typing, false)), *hint);
@@ -360,7 +362,7 @@ fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &s
     };
     // 右:动态信息(负载 1/5/15 分钟 / 时间 / 刷新)。窄了先裁掉最左的负载,时间/刷新恒可见。
     // 负载三个数各按「值/核数」上色,红=超过本机核数(跨机器统一,不用心算)。
-    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let ncpu = snap.ncpu; // 数 /proc/stat 得到的全机核数,不受 taskset 亲和性影响
     let (l1, l5, l15) = snap.load;
     let mut spans = vec![Span::styled("负载 ", dim())];
     for (i, v) in [l1, l5, l15].iter().enumerate() {
@@ -861,6 +863,7 @@ mod tests {
             net: (1.0, 2.0),
             uptime: 50.0 * 86400.0 + 4.0 * 3600.0,
             load: (13.48, 18.18, 26.75),
+            ncpu: 112,
             driver: "570.211.01".into(),
             cuda: "12.8".into(),
         }
