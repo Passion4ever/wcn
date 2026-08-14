@@ -698,7 +698,12 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str) {
             Span::raw(" "),
             Span::styled(pad(&sm_txt, w_gpu, Alignment::Right), sm_st),
             Span::raw(" "),
-            Span::styled(pad(&format!("{}M", p.fb), w_vram, Alignment::Right), Style::default().fg(Color::Cyan)),
+            // 与上方"显存用量"同单位(G),不必再心算 ÷1024;复用 CPU 表 RES 列的
+            // 同一套格式化(fmt_rss 吃 KiB,故 MiB×1024),≥1G 显示 66.3G、以下仍显示 924M
+            Span::styled(
+                pad(&crate::parse::fmt_rss(crate::parse::pi(&p.fb) * 1024), w_vram, Alignment::Right),
+                Style::default().fg(Color::Cyan),
+            ),
             Span::raw(" "),
             Span::styled(pad(&format!("{}%", p.pcpu), w_cpu, Alignment::Right), base),
             Span::raw(" "),
