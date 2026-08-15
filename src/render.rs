@@ -186,25 +186,35 @@ fn line_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
         return vec![];
     }
     let pct = pct.clamp(0.0, 100.0);
-    let n = ((pct / 100.0) * width as f64).floor() as usize;
-    let n = n.min(width);
+    // 以半格为单位:╸ 只覆盖半格,原来 floor 之后固定拿它收尾,100% 时最后半格永远是空的
+    // (条永远差一口)。改成满格画 ━、余半格才画 ╸,顺带分辨率翻倍。
+    let halves = ((pct / 100.0) * (width * 2) as f64).round() as usize;
+    let halves = halves.min(width * 2);
+    let full = halves / 2;
+    let half = halves % 2;
     let st = pct_style(pct);
     let mut spans = Vec::new();
-    if n == 0 {
-        spans.push(Span::styled("━".repeat(width), dim()));
-    } else {
-        spans.push(Span::styled("━".repeat(n - 1), st));
+    if full > 0 {
+        spans.push(Span::styled("━".repeat(full), st));
+    }
+    if half > 0 {
         spans.push(Span::styled("╸".to_string(), st));
-        if width > n {
-            spans.push(Span::styled("━".repeat(width - n), dim()));
-        }
+    }
+    let used = full + half;
+    if width > used {
+        spans.push(Span::styled("━".repeat(width - used), dim()));
     }
     spans
 }
 
 fn hrule(w: usize) -> Line<'static> {
+    // 两端各内缩 1 格:横线原来顶到边框,粗 ━ 直接撞在细 │ 上(全屏唯一的笔画冲突),
+    // 而表头和数据都从第 1 格起 —— 内缩后三者同版心。
     // dim:它只是分隔,不该是全屏最亮最长的元素(同面板里次要的卡间 ─ 本来就是 dim 的)
-    Line::from(Span::styled("━".repeat(w), dim()))
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("━".repeat(w.saturating_sub(2)), dim()),
+    ])
 }
 
 fn me_style(user: &str, me: &str) -> Option<Style> {
@@ -227,22 +237,20 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     let min_h = 12 + ngpu;
     if w < 60 || h < min_h {
         let msg = vec![
-            Line::from(Span::styled("窗口太小", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
-            Line::from(""),
             Line::from(format!("当前  {} × {}", w, h)),
             Line::from(format!("建议至少  60 × {}", min_h)),
             Line::from(""),
             Line::from(Span::styled("(调小字体可获得更多空间)", dim())),
         ];
         let bw = 36u16.min(area.width);
-        let bh = 8u16.min(area.height);
+        let bh = 6u16.min(area.height);
         let rect = Rect {
             x: area.x + area.width.saturating_sub(bw) / 2,
             y: area.y + area.height.saturating_sub(bh) / 2,
             width: bw,
             height: bh,
         };
-        f.render_widget(Paragraph::new(msg).alignment(Alignment::Center).block(panel("", Color::Red)), rect);
+        f.render_widget(Paragraph::new(msg).alignment(Alignment::Center).block(panel("窗口太小", Color::Red)), rect);
         return;
     }
 
@@ -261,11 +269,16 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         let shown = procs.len().min(n);
         let order = if rev { "升序" } else { "降序" };
         let tag = filter.map(|f| f.tag()).unwrap_or_default();
-        let title = format!("CPU 进程{} · 共 {},显示 {}({})", tag, procs.len(), shown, order);
+        let title = format!("CPU 进程{}", tag);
+        let count = format!(" 共 {} · 显示 {} · {} ", procs.len(), shown, order);
         let inner_w = chunks[1].width.saturating_sub(2) as usize;
         let lines = cpu_lines(&procs[..shown], me, true, inner_w);
         let bc = if filter.is_some() { Color::Yellow } else { Color::Blue };
-        f.render_widget(Paragraph::new(lines).block(panel(&title, bc)), chunks[1]);
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(panel(&title, bc).title_top(Line::from(count).right_aligned())),
+            chunks[1],
+        );
         f.render_widget(Paragraph::new(hint_line(paused, typing, true)), chunks[2]);
         return;
     }
@@ -298,8 +311,9 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
     let gp_need = snap.gpu_procs.len() + ncards.saturating_sub(1); // 进程行 + 卡间分隔线
     let gp_content = gp_need.min(remaining.saturating_sub(4));     // 4 = 边框2+表头1+横线1
     // 有 chrome 的空间就画面板(内容行可为 0):没进程时是空面板,挤不下时靠标题说明,
-    // 都比留一块无解释的空白强
-    let gpu_procs_h = if remaining >= 4 { 4 + gp_content } else { 0 };
+    // 都比留一块无解释的空白强。但整机没有 GPU 时("无 NVIDIA GPU"已在上面说明白了)
+    // 这块空表纯属占地方,直接不画,把 4 行让给 CPU 进程。
+    let gpu_procs_h = if ngpu == 0 || remaining < 4 { 0 } else { 4 + gp_content };
     // .max(1):筛出 0 条时也保留面板(否则整块凭空消失,像是坏了)
     let want_cpu = cprocs.len().min(10).max(1);
     let cpu_rows = remaining.saturating_sub(gpu_procs_h + cpu_chrome).min(want_cpu);
@@ -329,8 +343,13 @@ pub fn render(f: &mut Frame, snap: &Snapshot, mode: Mode, rev: bool, me: &str, h
         let tag = filter.map(|f| f.tag()).unwrap_or_default();
         let bc = if filter.is_some() { Color::Yellow } else { Color::Blue };
         // 不写死 "Top 10":实际行数由剩余高度决定,可能只有 1 行;筛选后更要给总数
-        let title = format!("CPU 进程{} · 共 {},显示 {}", tag, cprocs.len(), cpu_rows);
-        f.render_widget(Paragraph::new(lines).block(panel(&title, bc)), chunks[3]);
+        let title = format!("CPU 进程{}", tag);
+        let count = format!(" 共 {} · 显示 {} ", cprocs.len(), cpu_rows);
+        f.render_widget(
+            Paragraph::new(lines)
+                .block(panel(&title, bc).title_top(Line::from(count).right_aligned())),
+            chunks[3],
+        );
     }
     let hint = chunks.last().unwrap();
     f.render_widget(Paragraph::new(hint_line(paused, typing, false)), *hint);
@@ -379,7 +398,9 @@ fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &s
         Span::styled("刷新 0.8s", dim())
     };
     // 右:动态信息(负载 1/5/15 分钟 / 时间 / 刷新)。窄了先裁掉最左的负载,时间/刷新恒可见。
-    // 负载三个数各按「值/核数」上色,红=超过本机核数(跨机器统一,不用心算)。
+    // 负载显示成「占本机核数的百分比」而不是原始值:原始值必须先知道这台机器几核才读得懂
+    // (33.10 在 112 核上是闲、在 16 核上是严重超载),换台机器就得重新心算。
+    // 百分比自解释,>100% 即排队。颜色同口径。
     let ncpu = snap.ncpu; // 数 /proc/stat 得到的全机核数,不受 taskset 亲和性影响
     let (l1, l5, l15) = snap.load;
     let mut spans = vec![Span::styled("负载 ", dim())];
@@ -387,15 +408,21 @@ fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &s
         if i > 0 {
             spans.push(Span::styled(" ", dim()));
         }
-        spans.push(Span::styled(format!("{:.2}", v), load_style(*v, ncpu)));
+        let pct = v / ncpu.max(1) as f64 * 100.0;
+        spans.push(Span::styled(format!("{:.0}%", pct), load_style(*v, ncpu)));
     }
     spans.push(Span::styled(" · ", dim()));
     spans.push(Span::styled(format!("{} · ", now), dim()));
     spans.push(tail);
+    // 按右半的实际宽度切,而不是各占一半 —— 各占一半时右半放不下就从尾部裁,
+    // 结果被裁掉的正是"刷新/时间",与本函数注释里承诺的相反(实测 100 列丢 "刷新 0.8s")。
+    // 现在窄了先挤左边的主机名,时间/刷新恒可见。
+    let rw: usize = spans.iter().map(|s| str_w(&s.content)).sum();
     let right = Line::from(spans).alignment(Alignment::Right);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        // +2:右半留一点余量,窄屏时左半被截也不会和右半贴在一起
+        .constraints([Constraint::Min(0), Constraint::Length(rw as u16 + 2)])
         .split(area);
     f.render_widget(Paragraph::new(left), cols[0]);
     f.render_widget(Paragraph::new(right), cols[1]);
@@ -667,12 +694,13 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str, budget
     // budget = 可用的内容行数(进程行 + 卡间分隔线)。放不下就少列几行,但必须在标题
     // 说清楚 —— 默默少显示正是这次要修的那类 bug。
     let need = snap.gpu_procs.len() + counts.len().saturating_sub(1);
-    let title = if budget >= need {
-        "GPU 进程".to_string()
-    } else {
-        format!("GPU 进程 · 共 {},窗口太小只显示部分", snap.gpu_procs.len())
-    };
-    let block = panel(&title, Color::Yellow);
+    let mut block = panel("GPU 进程", Color::Yellow);
+    if budget < need {
+        block = block.title_top(
+            Line::from(format!(" 共 {} · 窗口太小,只显示部分 ", snap.gpu_procs.len()))
+                .right_aligned(),
+        );
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
     let iw = inner.width as usize;
@@ -715,7 +743,11 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str, budget
             break;
         }
         if sep {
-            lines.push(Line::from(Span::styled("─".repeat(iw), dim()))); // 卡间细横线
+            // 与表头粗线同样内缩 1 格,三者(表头/分隔线/数据)同版心
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("─".repeat(iw.saturating_sub(2)), dim()),
+            ])); // 卡间细横线
             used += 1;
         }
         used += 1;
@@ -770,7 +802,10 @@ fn cpu_lines<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) 
     let (w_pid, w_user, w_cpu, w_mem, w_res, w_swap, w_time) = (7, 10, 6, 5, 6, 6, 7); // w_cpu=6:满载可达 11200%
     let fixed = w_pid + w_user + w_cpu + w_mem + w_res + w_time + if with_swap { w_swap } else { 0 };
     let ncols = if with_swap { 8 } else { 7 };
-    let cmd_w = inner_w.saturating_sub(1 + fixed + (ncols - 1) + 1); // 末尾 +1:与行首缩进对称
+    // 行首缩进 4 格与 GPU 进程表对齐(那边是 1空+卡号1+2空),两张表的
+    // PID/USER/TIME/COMMAND 边界随之对上,上下读成一张表,按 [c] 切页也不横跳。
+    let lead = 4usize;
+    let cmd_w = inner_w.saturating_sub(lead + fixed + (ncols - 1) + 1); // 末尾 +1:与行首缩进对称
     let sp = || Span::raw(" ");
 
     // 表头(列名 + 对齐)
@@ -787,7 +822,7 @@ fn cpu_lines<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) 
     head_cols.push(("TIME", w_time, Alignment::Right));
 
     let mut lines: Vec<Line> = Vec::new();
-    let mut hs: Vec<Span> = vec![sp()];
+    let mut hs: Vec<Span> = vec![Span::raw(" ".repeat(lead))];
     for (name, wd, al) in &head_cols {
         hs.push(Span::styled(pad(name, *wd, *al), hdr_style()));
         hs.push(sp());
@@ -798,7 +833,7 @@ fn cpu_lines<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) 
 
     for p in procs {
         let base = me_style(&p.user, me).unwrap_or_default();
-        let mut spans: Vec<Span> = vec![sp()];
+        let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(lead))];
         spans.push(Span::styled(pad(&p.pid, w_pid, Alignment::Right), base));
         spans.push(sp());
         spans.push(Span::styled(pad(&p.user, w_user, Alignment::Left), base));
