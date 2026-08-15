@@ -161,13 +161,23 @@ fn pad(s: &str, w: usize, align: Alignment) -> String {
 }
 
 /// 实心块条 █/░(GPU 显存列)。
+/// 渐变块:一个字符格 4 档(░▒▓█),关键是这几个字符都**铺满整格**,
+/// 不像八分块 ▌ 那样只填半格、右半格露出终端背景色(那会在填充与空档之间显出一道黑缝)。
+const SHADES: [&str; 4] = ["", "▒", "▓", "█"];
+
 fn cell_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
     let pct = pct.clamp(0.0, 100.0);
-    let fill = ((pct / 100.0 * width as f64).round() as usize).min(width);
-    vec![
-        Span::styled("█".repeat(fill), pct_style(pct)),
-        Span::styled("░".repeat(width - fill), dim()),
-    ]
+    // 以 1/4 格为单位算总长,整格画 █,余数画对应的渐变块
+    let units = ((pct / 100.0 * (width * 4) as f64).round() as usize).min(width * 4);
+    let full = units / 4;
+    let rem = units % 4;
+    let mut out = vec![Span::styled("█".repeat(full), pct_style(pct))];
+    if rem > 0 {
+        out.push(Span::styled(SHADES[rem].to_string(), pct_style(pct)));
+    }
+    let used = full + usize::from(rem > 0);
+    out.push(Span::styled("░".repeat(width.saturating_sub(used)), dim()));
+    out
 }
 
 /// 重线条 ━ + 端帽 ╸(rich ProgressBar 风格,系统面板用)。
@@ -193,7 +203,8 @@ fn line_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
 }
 
 fn hrule(w: usize) -> Line<'static> {
-    Line::from(Span::raw("━".repeat(w)))
+    // dim:它只是分隔,不该是全屏最亮最长的元素(同面板里次要的卡间 ─ 本来就是 dim 的)
+    Line::from(Span::styled("━".repeat(w), dim()))
 }
 
 fn me_style(user: &str, me: &str) -> Option<Style> {
@@ -346,6 +357,13 @@ fn hint_line<'a>(paused: bool, typing: Option<&str>, cpu_page: bool) -> Line<'a>
 }
 
 fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &str, paused: bool) {
+    // 左右各缩 2 格:全屏文字基线都在第 2 列(面板边框 + 1 格),顶栏原来从第 0 列起、
+    // 右端顶到最外沿,是唯一破版心的元素。
+    let area = Rect {
+        x: area.x + 2,
+        width: area.width.saturating_sub(4),
+        ..area
+    };
     // 左:身份类信息(版本 / 主机 / 开机时长)
     let left = Line::from(vec![
         Span::styled(concat!("wcn v", env!("CARGO_PKG_VERSION")), hdr_style()),
@@ -371,8 +389,8 @@ fn render_header(f: &mut Frame, area: Rect, snap: &Snapshot, host: &str, now: &s
         }
         spans.push(Span::styled(format!("{:.2}", v), load_style(*v, ncpu)));
     }
-    spans.push(Span::styled("  ·  ", dim()));
-    spans.push(Span::styled(format!("{}  ·  ", now), dim()));
+    spans.push(Span::styled(" · ", dim()));
+    spans.push(Span::styled(format!("{} · ", now), dim()));
     spans.push(tail);
     let right = Line::from(spans).alignment(Alignment::Right);
     let cols = Layout::default()
@@ -437,17 +455,19 @@ fn render_sys(f: &mut Frame, area: Rect, snap: &Snapshot) {
     ));
     if sw_total > 0.0 {
         let sw_pct = sw_used / sw_total * 100.0;
+        // 空交换用 dim 而非绝对的 Color::Gray:Gray 在深色终端偏亮,会让常年为 0、
+        // 最没信息量的一行反而最显眼,在浅色终端上又几乎看不见。红/黄两档是警告,保持不变。
         let (col, tail) = if sw_active {
-            (Color::Red, " ⇅")
+            (Style::default().fg(Color::Red), " ⇅")
         } else if sw_used > 0.0 {
-            (Color::Yellow, "")
+            (Style::default().fg(Color::Yellow), "")
         } else {
-            (Color::Gray, "")
+            (dim(), "")
         };
         rows.push((
-            Span::styled("交换", Style::default().fg(col)),
+            Span::styled("交换", col),
             Mid::Bar(sw_pct),
-            Line::from(Span::styled(format!("{:.0}/{:.0}G{}", sw_used, sw_total, tail), Style::default().fg(col)))
+            Line::from(Span::styled(format!("{:.0}/{:.0}G{}", sw_used, sw_total, tail), col))
                 .alignment(Alignment::Right),
         ));
     }
@@ -662,7 +682,7 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str, budget
     // 行布局:1空 + idx(1) + 2空(gutter) + 各列(列间 1 空) + COMMAND
     // 表头/行的固定前缀宽度(到 COMMAND 前)
     let fixed = 1 + 1 + 2 + w_pid + 1 + w_user + 1 + w_gpu + 1 + w_vram + 1 + w_cpu + 1 + w_time + 1;
-    let cmd_avail = iw.saturating_sub(fixed);
+    let cmd_avail = iw.saturating_sub(fixed + 1); // +1:行尾也留 1 格,和行首的缩进对称
 
     let mut lines: Vec<Line> = Vec::new();
     // 表头(序号列空白)
@@ -728,7 +748,12 @@ fn render_gpu_procs(f: &mut Frame, area: Rect, snap: &Snapshot, me: &str, budget
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw(" "),
-            Span::styled(pad(&format!("{}%", p.pcpu), w_cpu, Alignment::Right), base),
+            // 固定默认色:既不跟行高亮,也不上阈值色。看 GPU 时不该被 CPU 的颜色分神,
+            // 要看 CPU 占用有下面专门的 CPU 进程表(那里才按阈值绿/黄/红)。
+            Span::styled(
+                pad(&format!("{}%", p.pcpu), w_cpu, Alignment::Right),
+                Style::default(),
+            ),
             Span::raw(" "),
             Span::styled(pad(&p.etime, w_time, Alignment::Right), dim()),
             Span::raw(" "),
@@ -745,7 +770,7 @@ fn cpu_lines<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) 
     let (w_pid, w_user, w_cpu, w_mem, w_res, w_swap, w_time) = (7, 10, 6, 5, 6, 6, 7); // w_cpu=6:满载可达 11200%
     let fixed = w_pid + w_user + w_cpu + w_mem + w_res + w_time + if with_swap { w_swap } else { 0 };
     let ncols = if with_swap { 8 } else { 7 };
-    let cmd_w = inner_w.saturating_sub(1 + fixed + (ncols - 1));
+    let cmd_w = inner_w.saturating_sub(1 + fixed + (ncols - 1) + 1); // 末尾 +1:与行首缩进对称
     let sp = || Span::raw(" ");
 
     // 表头(列名 + 对齐)
@@ -780,9 +805,14 @@ fn cpu_lines<'a>(procs: &[&CpuProc], me: &str, with_swap: bool, inner_w: usize) 
         spans.push(sp());
         spans.push(Span::styled(pad(&format!("{}%", p.pcpu), w_cpu, Alignment::Right), pct_style(pi(&p.pcpu))));
         spans.push(sp());
-        spans.push(Span::styled(pad(&format!("{}%", p.pmem), w_mem, Alignment::Right), base));
+        // MEM%/RES 用默认色,不跟行高亮:高亮只标"这行是谁的"(PID/USER/COMMAND),
+        // 指标列各自表达自己 —— 与 GPU 进程表同一规律
+        spans.push(Span::styled(pad(&format!("{}%", p.pmem), w_mem, Alignment::Right), Style::default()));
         spans.push(sp());
-        spans.push(Span::styled(pad(&crate::parse::fmt_rss(p.rss), w_res, Alignment::Right), base));
+        spans.push(Span::styled(
+            pad(&crate::parse::fmt_rss(p.rss), w_res, Alignment::Right),
+            Style::default(),
+        ));
         spans.push(sp());
         if with_swap {
             let (txt, st) = if p.swap == 0 {
@@ -903,6 +933,37 @@ mod tests {
         assert!(t.hit("bob", "/usr/bin/python3 a.py")); // 命令命中,不分大小写
         assert!(t.hit("pythonuser", "sleep"));          // 用户名命中
         assert!(!t.hit("bob", "sleep 1"));
+    }
+
+    #[test]
+    fn t_cell_bar() {
+        // 任何比例下,画出的字符总数都必须正好等于列宽,否则整行会错位
+        for w in [1usize, 5, 10, 24] {
+            for p in 0..=100 {
+                let n: usize = cell_bar(p as f64, w)
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum();
+                assert_eq!(n, w, "pct={p} width={w}");
+            }
+        }
+        let txt = |p: f64, w: usize| -> String {
+            cell_bar(p, w).iter().map(|s| s.content.to_string()).collect()
+        };
+        assert_eq!(txt(0.0, 4), "░░░░");
+        assert_eq!(txt(100.0, 4), "████");
+        assert_eq!(txt(50.0, 4), "██░░");
+        // 分辨率:同样 10 格,整块只能分出 11 种画面,渐变块(每格 4 档)能分出 30+ 种
+        let distinct: std::collections::BTreeSet<String> =
+            (0..=100).map(|p| txt(p as f64, 10)).collect();
+        assert!(distinct.len() > 25, "只分出 {} 档", distinct.len());
+        // 每个填充字符都必须铺满整格 —— 八分块 ▌ 只填半格,会在填充与空档之间露出背景色
+        for p in 0..=100 {
+            assert!(
+                txt(p as f64, 10).chars().all(|c| "░▒▓█".contains(c)),
+                "pct={p} 出现了不铺满整格的字符"
+            );
+        }
     }
 
     #[test]
