@@ -10,7 +10,7 @@
 set -euo pipefail
 
 REPO="Passion4ever/wcn"
-URL="https://github.com/$REPO/releases/latest/download/wcn"
+URL="https://github.com/$REPO/releases/latest/download/wcn-x86_64-linux-gnu"
 LOCAL_DIR="$HOME/.local/bin"
 GLOBAL_DIR="/usr/local/bin"
 

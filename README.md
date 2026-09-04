@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/Passion4ever/wcn/main/install.sh \
 不想跑脚本,手动装也行:
 
 ```bash
-curl -fsSL https://github.com/Passion4ever/wcn/releases/latest/download/wcn -o wcn
+curl -fsSL https://github.com/Passion4ever/wcn/releases/latest/download/wcn-x86_64-linux-gnu -o wcn
 chmod +x wcn && mv wcn ~/.local/bin/        # 或 sudo mv wcn /usr/local/bin/
 ```
 
