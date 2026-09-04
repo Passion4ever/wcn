@@ -76,6 +76,18 @@ fn temp_style(v: i64) -> Style {
         Style::default().fg(Color::Red)
     }
 }
+/// 交换行的配色与尾标。与 CPU/内存 同一套 pct_style(0%暗 / 低绿 / 高黄 / 很高红),
+/// 只有"正在换页"压过一切标红 —— 换页才是性能此刻正在被拖累的信号。
+/// 旧规则是"占用 >0 就黄",那会长期误报:实测本机 16G 被占、换页 0.00 MB/s、
+/// 内存压力 PSI 全 0,却一直亮着黄色警告。Linux 把长期不碰的页换出去本就正常。
+fn swap_style(pct: f64, active: bool) -> (Style, &'static str) {
+    if active {
+        (Style::default().fg(Color::Red), " ⇅")
+    } else {
+        (pct_style(pct), "")
+    }
+}
+
 /// 负载按「负载/核数」上色 —— 于是红色在任何机器上都等于"超过本机核数、在排队",
 /// 不用心算除核数。绿<70%,黄 70~100%,红 ≥100%。
 fn load_style(load: f64, ncpu: usize) -> Style {
@@ -181,7 +193,7 @@ fn cell_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
 }
 
 /// 重线条 ━ + 端帽 ╸(rich ProgressBar 风格,系统面板用)。
-fn line_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
+fn line_bar(pct: f64, width: usize, style: Option<Style>) -> Vec<Span<'static>> {
     if width == 0 {
         return vec![];
     }
@@ -192,7 +204,7 @@ fn line_bar(pct: f64, width: usize) -> Vec<Span<'static>> {
     let halves = halves.min(width * 2);
     let full = halves / 2;
     let half = halves % 2;
-    let st = pct_style(pct);
+    let st = style.unwrap_or_else(|| pct_style(pct));
     let mut spans = Vec::new();
     if full > 0 {
         spans.push(Span::styled("━".repeat(full), st));
@@ -448,7 +460,9 @@ fn render_top(f: &mut Frame, area: Rect, snap: &Snapshot, side_by_side: bool) {
 }
 
 enum Mid {
-    Bar(f64),
+    /// 进度条。Some(style) 时用指定颜色画已填充段(交换行换页时整行统一为红),
+    /// None 则按填充比例走 pct_style。
+    Bar(f64, Option<Style>),
     Text(Vec<Span<'static>>),
 }
 
@@ -472,28 +486,20 @@ fn render_sys(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let mut rows: Vec<(Span, Mid, Line)> = Vec::new();
     rows.push((
         Span::styled("CPU", Style::default().fg(Color::Cyan)),
-        Mid::Bar(cpu),
+        Mid::Bar(cpu, None),
         Line::from(Span::styled(format!("{:.0}%", cpu), pct_style(cpu))).alignment(Alignment::Right),
     ));
     rows.push((
         Span::styled("内存", Style::default().fg(Color::Magenta)),
-        Mid::Bar(mem_pct),
+        Mid::Bar(mem_pct, None),
         Line::from(Span::styled(format!("{:.0}/{:.0}G", mu, mt), pct_style(mem_pct))).alignment(Alignment::Right),
     ));
     if sw_total > 0.0 {
         let sw_pct = sw_used / sw_total * 100.0;
-        // 空交换用 dim 而非绝对的 Color::Gray:Gray 在深色终端偏亮,会让常年为 0、
-        // 最没信息量的一行反而最显眼,在浅色终端上又几乎看不见。红/黄两档是警告,保持不变。
-        let (col, tail) = if sw_active {
-            (Style::default().fg(Color::Red), " ⇅")
-        } else if sw_used > 0.0 {
-            (Style::default().fg(Color::Yellow), "")
-        } else {
-            (dim(), "")
-        };
+        let (col, tail) = swap_style(sw_pct, sw_active);
         rows.push((
             Span::styled("交换", col),
-            Mid::Bar(sw_pct),
+            Mid::Bar(sw_pct, Some(col)),
             Line::from(Span::styled(format!("{:.0}/{:.0}G{}", sw_used, sw_total, tail), col))
                 .alignment(Alignment::Right),
         ));
@@ -519,8 +525,8 @@ fn render_sys(f: &mut Frame, area: Rect, snap: &Snapshot) {
             .split(row_areas[i]);
         f.render_widget(Paragraph::new(Line::from(label)), cols[0]);
         match mid {
-            Mid::Bar(r) => {
-                let bar = line_bar(r, cols[1].width as usize);
+            Mid::Bar(r, st) => {
+                let bar = line_bar(r, cols[1].width as usize, st);
                 f.render_widget(Paragraph::new(Line::from(bar)), cols[1]);
             }
             Mid::Text(spans) => {
@@ -999,6 +1005,21 @@ mod tests {
                 "pct={p} 出现了不铺满整格的字符"
             );
         }
+    }
+
+    #[test]
+    fn t_swap_style() {
+        let red = Style::default().fg(Color::Red);
+        // 实测过的误报场景:16.4G/61G 被占,但换页 0.00 MB/s、PSI 全 0 —— 该是"正常"的绿,
+        // 不是警告(旧规则在这里报黄)
+        assert_eq!(swap_style(16.4 / 61.0 * 100.0, false), (pct_style(26.9), ""));
+        assert_eq!(swap_style(26.9, false).0, Style::default().fg(Color::Green));
+        // 空交换不刷存在感
+        assert_eq!(swap_style(0.0, false).0, dim());
+        // 占用很高:余量真的不多了
+        assert_eq!(swap_style(90.0, false).0, Style::default().fg(Color::Red));
+        // 正在换页:压过一切
+        assert_eq!(swap_style(5.0, true), (red, " ⇅"));
     }
 
     #[test]
